@@ -1,0 +1,817 @@
+menu "CUBE32 Board Configuration"
+
+    choice CUBE32_BOARD_MODEL
+        prompt "Board Model"
+        default CUBE32_BOARD_S3_CORE
+        help
+            Select the CUBE32 board model variant.
+
+        config CUBE32_BOARD_S3_CORE
+            bool "CUBE32-S3 Core"
+            help
+                CUBE32-S3 Core board based on ESP32-S3.
+    endchoice
+
+    config CUBE32_BOARD_NAME
+        string
+        default "CUBE32-S3 Core" if CUBE32_BOARD_S3_CORE
+        help
+            Board name string derived from the selected board model.
+            Used for logging and identification at runtime.
+
+    menu "Display Configuration"
+        config CUBE32_DISPLAY_ENABLED
+            bool "Enable Display"
+            default y
+            help
+                Enable display driver initialization.
+
+        choice CUBE32_DISPLAY_BOARD_MODEL
+            prompt "Display Board Model"
+            default CUBE32_DISPLAY_CUBE_TFT_TOUCH_154
+            depends on CUBE32_DISPLAY_ENABLED
+            help
+                Select the display board model.
+
+            config CUBE32_DISPLAY_CUBE_TFT_TOUCH_154
+                bool "CUBE_TFT_TOUCH_154 (240x240)"
+                help
+                    1.54 inch TFT display with touch, 240x240 resolution.
+
+            config CUBE32_DISPLAY_CUBE_TFT_TOUCH_200
+                bool "CUBE_TFT_TOUCH_200 (240x320)"
+                help
+                    2.0 inch TFT display with touch, 240x320 resolution.
+        endchoice
+
+        config CUBE32_LVGL_ENABLED
+            bool "Enable LVGL"
+            default y
+            depends on CUBE32_DISPLAY_ENABLED
+            help
+                Enable LVGL graphics library integration.
+                Requires the display driver to be enabled.
+                LVGL provides a feature-rich GUI framework with widgets,
+                themes, and animations.
+
+        config CUBE32_LVGL_DOUBLE_BUFFER
+            bool "Use Double Buffer"
+            default y
+            depends on CUBE32_LVGL_ENABLED
+            help
+                Use double buffering for smoother display updates.
+                Requires more memory but reduces flickering.
+
+        config CUBE32_LVGL_USE_SPIRAM
+            bool "Use SPIRAM for Buffers"
+            default y
+            depends on CUBE32_LVGL_ENABLED
+            help
+                Allocate LVGL display buffers in SPIRAM instead of internal RAM.
+                Use this if you have limited internal RAM but have PSRAM available.
+
+        config CUBE32_LVGL_TASK_PRIORITY
+            int "LVGL Task Priority"
+            default 4
+            range 1 24
+            depends on CUBE32_LVGL_ENABLED
+            help
+                Priority of the LVGL task. Higher values mean higher priority.
+
+        config CUBE32_LVGL_TASK_STACK_SIZE
+            int "LVGL Task Stack Size"
+            default 8192
+            range 4096 16384
+            depends on CUBE32_LVGL_ENABLED
+            help
+                Stack size in bytes for the LVGL task.
+    endmenu
+
+    menu "Touch Configuration"
+        config CUBE32_TOUCH_ENABLED
+            bool "Enable Touch"
+            default y
+            help
+                Enable touch driver initialization.
+    endmenu
+
+    menu "Audio Configuration"
+        config CUBE32_AUDIO_ENABLED
+            bool "Enable Audio"
+            default n
+            help
+                Enable audio codec driver initialization.
+                Uses ES8311 for output and ES7210 for microphone input.
+
+        config CUBE32_AUDIO_INPUT_SAMPLE_RATE
+            int "Input Sample Rate (Hz)"
+            default 16000
+            range 8000 48000
+            depends on CUBE32_AUDIO_ENABLED
+            help
+                Audio input (microphone) sample rate in Hz.
+                Default is 16000 Hz to support AEC which requires 16kHz.
+                Common values: 8000, 16000, 24000, 44100, 48000.
+
+        config CUBE32_AUDIO_OUTPUT_SAMPLE_RATE
+            int "Output Sample Rate (Hz)"
+            default 24000
+            range 8000 48000
+            depends on CUBE32_AUDIO_ENABLED
+            help
+                Audio output (speaker) sample rate in Hz.
+                Default is 24000 Hz.
+                Common values: 8000, 16000, 24000, 44100, 48000.
+
+        config CUBE32_AUDIO_OUTPUT_VOLUME
+            int "Output Volume"
+            default 70
+            range 0 100
+            depends on CUBE32_AUDIO_ENABLED
+            help
+                Default output volume level (0-100).
+
+        config CUBE32_AUDIO_INPUT_GAIN
+            int "Input Gain (dB)"
+            default 30
+            range 0 100
+            depends on CUBE32_AUDIO_ENABLED
+            help
+                Default microphone input gain in dB (0-100).
+
+        choice CUBE32_AUDIO_AEC_MODE
+            prompt "AEC Mode"
+            default CUBE32_AUDIO_AEC_HW
+            depends on CUBE32_AUDIO_ENABLED
+            help
+                Select acoustic echo cancellation mode.
+                HW AEC uses the ES7210 ch1 hardware reference loopback.
+                SW AEC uses a software copy of the playback buffer as reference.
+                The audio driver automatically clamps input sample rate to 16 kHz
+                when AEC is enabled (HW or SW) because esp-sr requires 16 kHz.
+
+            config CUBE32_AUDIO_AEC_NONE
+                bool "No AEC"
+                help
+                    Disable acoustic echo cancellation.
+                    Input uses 1 channel (mic only).
+
+            config CUBE32_AUDIO_AEC_HW
+                bool "HW AEC (hardware reference loopback)"
+                help
+                    Hardware reference loopback via ES7210 ch1.
+                    Input uses 2 channels (mic + reference).
+                    Requires esp-sr afe_aec API in application code.
+
+            config CUBE32_AUDIO_AEC_SW
+                bool "SW AEC (software reference)"
+                help
+                    Software-supplied reference buffer for AEC.
+                    Input uses 1 channel (mic only).
+                    Application must supply playback frames as reference
+                    to esp-sr aec_process().
+        endchoice
+
+        config CUBE32_ADC_BUTTON_ENABLED
+            bool "Enable ADC Button Array"
+            default n
+            help
+                Enable ADC button array driver initialization.
+                Uses a single ADC pin with resistor voltage dividers
+                to detect up to 6 different buttons.
+                
+                Typical resistor divider setup (from 3.3V with 10K pull-up):
+                - Button 0: 1.3K  -> ~0.38V (Volume Up)
+                - Button 1: 3.3K  -> ~0.82V (Volume Down)
+                - Button 2: 5.1K  -> ~1.11V
+                - Button 3: 10K   -> ~1.65V (Play/Stop)
+                - Button 4: 15K   -> ~1.98V (Mute)
+                - Button 5: 27K   -> ~2.41V
+    endmenu
+
+    menu "Camera Configuration"
+        config CUBE32_CAMERA_ENABLED
+            bool "Enable Camera"
+            default n
+            help
+                Enable camera driver initialization.
+                Uses the shared I2C bus for SCCB communication.
+
+        choice CUBE32_CAMERA_FRAME_SIZE
+            prompt "Camera Frame Size"
+            default CUBE32_CAMERA_FRAME_SIZE_QQVGA
+            depends on CUBE32_CAMERA_ENABLED
+            help
+                Select the default camera frame size.
+
+            config CUBE32_CAMERA_FRAME_SIZE_QQVGA
+                bool "QQVGA (160x120)"
+                help
+                    160x120 resolution, lowest memory usage.
+
+            config CUBE32_CAMERA_FRAME_SIZE_QVGA
+                bool "QVGA (320x240)"
+                help
+                    320x240 resolution, good balance of quality and memory.
+
+            config CUBE32_CAMERA_FRAME_SIZE_VGA
+                bool "VGA (640x480)"
+                help
+                    640x480 resolution, higher quality but more memory.
+
+            config CUBE32_CAMERA_FRAME_SIZE_SVGA
+                bool "SVGA (800x600)"
+                help
+                    800x600 resolution.
+
+            config CUBE32_CAMERA_FRAME_SIZE_XGA
+                bool "XGA (1024x768)"
+                help
+                    1024x768 resolution, high quality but requires more PSRAM.
+
+            config CUBE32_CAMERA_FRAME_SIZE_SXGA
+                bool "SXGA (1280x1024)"
+                help
+                    1280x1024 resolution, maximum quality, requires significant PSRAM.
+        endchoice
+
+        choice CUBE32_CAMERA_PIXEL_FORMAT
+            prompt "Camera Pixel Format"
+            default CUBE32_CAMERA_PIXEL_FORMAT_RGB565
+            depends on CUBE32_CAMERA_ENABLED
+            help
+                Select the camera pixel format.
+
+            config CUBE32_CAMERA_PIXEL_FORMAT_RGB565
+                bool "RGB565"
+                help
+                    16-bit RGB565 format, suitable for display.
+
+            config CUBE32_CAMERA_PIXEL_FORMAT_JPEG
+                bool "JPEG"
+                help
+                    JPEG compressed format, suitable for transmission.
+
+            config CUBE32_CAMERA_PIXEL_FORMAT_GRAYSCALE
+                bool "Grayscale"
+                help
+                    8-bit grayscale format, lowest memory usage.
+        endchoice
+    endmenu
+
+    menu "SD Card Configuration"
+        config CUBE32_SDCARD_ENABLED
+            bool "Enable SD Card"
+            default n
+            help
+                Enable SD card driver initialization.
+    endmenu
+
+    menu "PMU Configuration"
+        config CUBE32_PMU_ENABLED
+            bool "Enable PMU (AXP2101)"
+            default y
+            help
+                Enable Power Management Unit driver initialization.
+                Uses the AXP2101 PMU chip via I2C.
+                I2C pins are configured via XPowersLib's CONFIG_PMU_I2C_SDA
+                and CONFIG_PMU_I2C_SCL options in menuconfig.
+    endmenu
+
+    menu "RTC Configuration"
+        config CUBE32_RTC_ENABLED
+            bool "Enable RTC (BM8563)"
+            default y
+            help
+                Enable Real-Time Clock driver initialization.
+                Uses the BM8563 RTC chip via I2C.
+                The RTC provides battery-backed timekeeping with
+                timer and alarm functionality.
+
+    endmenu
+
+    menu "WiFi Configuration"
+        config CUBE32_WIFI_SSID
+            string "WiFi SSID"
+            default "myssid"
+            help
+                SSID (network name) to connect to.
+
+        config CUBE32_WIFI_PASSWORD
+            string "WiFi Password"
+            default "mypassword"
+            help
+                WiFi password (WPA or WPA2) to use.
+
+        choice CUBE32_WIFI_SAE_MODE
+            prompt "WPA3 SAE mode selection"
+            default CUBE32_WIFI_SAE_PWE_BOTH
+            help
+                Select mode for SAE as Hunt and Peck, H2E or both.
+            config CUBE32_WIFI_SAE_PWE_HUNT_AND_PECK
+                bool "HUNT AND PECK"
+            config CUBE32_WIFI_SAE_PWE_H2E
+                bool "H2E"
+                depends on ESP_WIFI_ENABLE_SAE_H2E
+            config CUBE32_WIFI_SAE_PWE_BOTH
+                bool "BOTH"
+                depends on ESP_WIFI_ENABLE_SAE_H2E
+        endchoice
+
+        config CUBE32_WIFI_PW_ID
+            string "PASSWORD IDENTIFIER"
+            depends on CUBE32_WIFI_SAE_PWE_H2E || CUBE32_WIFI_SAE_PWE_BOTH
+            default ""
+            help
+                Password identifier for SAE H2E.
+
+        config CUBE32_WIFI_MAX_RETRY
+            int "Maximum retry attempts"
+            default 5
+            range 1 20
+            help
+                Maximum number of connection retry attempts
+                before giving up.
+
+        choice CUBE32_WIFI_SCAN_AUTH_MODE_THRESHOLD
+            prompt "WiFi Scan auth mode threshold"
+            default CUBE32_WIFI_AUTH_WPA2_PSK
+            help
+                The weakest authmode to accept in the scan mode.
+                This value defaults to WPA2_PSK in case a password is present
+                and OPEN is used otherwise.
+            config CUBE32_WIFI_AUTH_OPEN
+                bool "OPEN"
+            config CUBE32_WIFI_AUTH_WEP
+                bool "WEP"
+            config CUBE32_WIFI_AUTH_WPA_PSK
+                bool "WPA PSK"
+            config CUBE32_WIFI_AUTH_WPA2_PSK
+                bool "WPA2 PSK"
+            config CUBE32_WIFI_AUTH_WPA_WPA2_PSK
+                bool "WPA/WPA2 PSK"
+            config CUBE32_WIFI_AUTH_WPA3_PSK
+                bool "WPA3 PSK"
+            config CUBE32_WIFI_AUTH_WPA2_WPA3_PSK
+                bool "WPA2/WPA3 PSK"
+            config CUBE32_WIFI_AUTH_WAPI_PSK
+                bool "WAPI PSK"
+        endchoice
+    endmenu
+
+    menu "Modem Configuration"
+        config CUBE32_MODEM_ENABLED
+            bool "Enable Modem (A7670)"
+            default n
+            help
+                Enable cellular modem driver initialization.
+                Supports SimCom A7670 LTE modem via USB or UART.
+                
+                NOTE: USB Modem (with USB connection) and USB Input cannot
+                be used at the same time as they both require the USB Host
+                controller. Use UART connection for modem if USB Input is needed.
+
+        choice CUBE32_MODEM_MODEL
+            prompt "Modem Model"
+            default CUBE32_MODEM_A7670
+            depends on CUBE32_MODEM_ENABLED
+            help
+                Select the cellular modem model.
+
+            config CUBE32_MODEM_A7670
+                bool "SimCom A7670"
+                help
+                    SimCom A7670 LTE Cat-1 modem.
+                    USB: VID=0x1E0E, PID=0x9011
+                    Interfaces: AT=4, Data=5
+
+            config CUBE32_MODEM_SIM7600
+                bool "SimCom SIM7600"
+                help
+                    SimCom SIM7600 LTE-A modem.
+                    USB: VID=0x1E0E, PID=0x9001
+                    Interface: 3
+        endchoice
+
+        choice CUBE32_MODEM_CONNECTION
+            prompt "Modem Connection Type"
+            default CUBE32_MODEM_CONNECTION_USB
+            depends on CUBE32_MODEM_ENABLED
+            help
+                Select how the modem is connected to ESP32.
+
+            config CUBE32_MODEM_CONNECTION_USB
+                bool "USB"
+                help
+                    Connect modem via USB CDC-ACM interface.
+                    Requires USB Host support on ESP32-S3.
+
+            config CUBE32_MODEM_CONNECTION_UART
+                bool "UART"
+                help
+                    Connect modem via UART serial port.
+                    Note: UART support is planned for future implementation.
+        endchoice
+
+        menu "Modem USB Configuration"
+            depends on CUBE32_MODEM_ENABLED && CUBE32_MODEM_CONNECTION_USB
+
+            config CUBE32_MODEM_USB_TIMEOUT_MS
+                int "USB Connection Timeout (ms)"
+                default 30000
+                range 5000 120000
+                help
+                    Timeout in milliseconds for USB modem to connect.
+        endmenu
+
+        menu "UART Configuration"
+            depends on CUBE32_MODEM_ENABLED && CUBE32_MODEM_CONNECTION_UART
+
+            config CUBE32_MODEM_UART_BAUD_RATE
+                int "UART Baud Rate"
+                default 115200
+                help
+                    UART baud rate for modem communication.
+                    UART port, TX pin, and RX pin are defined in cube32_config.h.
+        endmenu
+
+        config CUBE32_MODEM_AUTO_CONNECT
+            bool "Auto Connect to Network"
+            default y
+            depends on CUBE32_MODEM_ENABLED
+            help
+                Automatically attempt to connect to cellular network
+                during modem initialization.
+
+        config CUBE32_MODEM_NETWORK_TIMEOUT_MS
+            int "Network Registration Timeout (ms)"
+            default 60000
+            range 10000 300000
+            depends on CUBE32_MODEM_ENABLED
+            help
+                Timeout for network registration in milliseconds.
+
+    endmenu
+
+    menu "BLE OTA Configuration"
+        config CUBE32_BLE_OTA_ENABLED
+            bool "Enable BLE OTA"
+            default y
+            help
+                Enable BLE-based OTA firmware update and command interface.
+                Uses NimBLE stack for BLE communication.
+
+                PREREQUISITE: In menuconfig, enable
+                  Component config → Bluetooth → Bluetooth → NimBLE - BLE only
+
+                Features:
+                - BLE GATT server with OTA service
+                - Command/Response communication via custom characteristic
+                - OTA firmware updates from BLE client
+                - Double-reset detection for BLE OTA trigger
+                - System restart and power off commands
+
+                BLE Clients:
+                - Python client (Bleak library) for Mac/Windows/Linux
+                - Mobile apps (Android/iOS)
+
+        config CUBE32_BLE_OTA_DOUBLE_BOOT_ENABLE
+            bool "Start BLE OTA on Double Boot"
+            default n
+            depends on CUBE32_BLE_OTA_ENABLED
+            help
+                When enabled, BLE OTA will automatically start if the
+                device is booted twice within the configured time gap.
+                This allows entering BLE OTA mode without code changes.
+                
+                To trigger:
+                1. Press reset button
+                2. Wait less than "Double Boot Time Gap"
+                3. Press reset button again
+                4. BLE OTA will start automatically
+
+        config CUBE32_BLE_OTA_DOUBLE_BOOT_TIME_MS
+            int "Double Boot Time Gap (ms)"
+            default 5000
+            range 1000 10000
+            depends on CUBE32_BLE_OTA_DOUBLE_BOOT_ENABLE
+            help
+                Time window in milliseconds to detect double boot.
+                If device is booted twice within this time, BLE OTA starts.
+                Default: 5000ms (5 seconds)
+
+        config CUBE32_BLE_OTA_MTU_SIZE
+            int "BLE MTU Size"
+            default 512
+            range 23 517
+            depends on CUBE32_BLE_OTA_ENABLED
+            help
+                Maximum Transmission Unit size for BLE GATT.
+                Larger MTU improves OTA transfer speed.
+                517 is the maximum for NimBLE.
+
+    endmenu
+
+    menu "PWM Servo Configuration"
+        config CUBE32_SERVO_ENABLED
+            bool "Enable PWM Servo Driver"
+            default n
+            help
+                Enable PWM servo control using ESP32-S3 LEDC hardware.
+                Supports up to 2 independent servo channels.
+                
+                Features:
+                - Hardware LEDC PWM (zero CPU overhead)
+                - Support for 90°, 180°, and 360° (continuous rotation) servos
+                - Angle control with configurable pulse width range
+                - Speed-controlled smooth rotation
+
+        config CUBE32_SERVO_NUM_CHANNELS
+            int "Number of Servo Channels"
+            default 2
+            range 1 2
+            depends on CUBE32_SERVO_ENABLED
+            help
+                Number of servo channels to configure (1 or 2).
+
+        config CUBE32_SERVO1_PIN
+            int "Servo 1 Signal GPIO"
+            default 47
+            range 0 48
+            depends on CUBE32_SERVO_ENABLED
+            help
+                GPIO pin for Servo 1 PWM signal output.
+
+        choice CUBE32_SERVO1_ROTATION
+            prompt "Servo 1 Max Rotation"
+            default CUBE32_SERVO1_ROTATION_90
+            depends on CUBE32_SERVO_ENABLED
+            help
+                Maximum rotation range for Servo 1.
+
+            config CUBE32_SERVO1_ROTATION_90
+                bool "90 degrees"
+            config CUBE32_SERVO1_ROTATION_180
+                bool "180 degrees"
+            config CUBE32_SERVO1_ROTATION_360
+                bool "360 degrees (continuous rotation)"
+        endchoice
+
+        config CUBE32_SERVO1_MAX_ROTATION
+            int
+            default 90 if CUBE32_SERVO1_ROTATION_90
+            default 180 if CUBE32_SERVO1_ROTATION_180
+            default 360 if CUBE32_SERVO1_ROTATION_360
+
+        config CUBE32_SERVO1_MIN_PULSE_US
+            int "Servo 1 Min Pulse Width (µs)"
+            default 500
+            range 100 2500
+            depends on CUBE32_SERVO_ENABLED
+            help
+                Minimum pulse width in microseconds (0° position).
+                Standard servos typically use 500-1000 µs.
+
+        config CUBE32_SERVO1_MAX_PULSE_US
+            int "Servo 1 Max Pulse Width (µs)"
+            default 2500
+            range 500 3000
+            depends on CUBE32_SERVO_ENABLED
+            help
+                Maximum pulse width in microseconds (max° position).
+                Standard servos typically use 2000-2500 µs.
+
+        config CUBE32_SERVO2_PIN
+            int "Servo 2 Signal GPIO"
+            default 48
+            range 0 48
+            depends on CUBE32_SERVO_ENABLED && CUBE32_SERVO_NUM_CHANNELS = 2
+            help
+                GPIO pin for Servo 2 PWM signal output.
+
+        choice CUBE32_SERVO2_ROTATION
+            prompt "Servo 2 Max Rotation"
+            default CUBE32_SERVO2_ROTATION_360
+            depends on CUBE32_SERVO_ENABLED && CUBE32_SERVO_NUM_CHANNELS = 2
+            help
+                Maximum rotation range for Servo 2.
+
+            config CUBE32_SERVO2_ROTATION_90
+                bool "90 degrees"
+            config CUBE32_SERVO2_ROTATION_180
+                bool "180 degrees"
+            config CUBE32_SERVO2_ROTATION_360
+                bool "360 degrees (continuous rotation)"
+        endchoice
+
+        config CUBE32_SERVO2_MAX_ROTATION
+            int
+            default 90 if CUBE32_SERVO2_ROTATION_90
+            default 180 if CUBE32_SERVO2_ROTATION_180
+            default 360 if CUBE32_SERVO2_ROTATION_360
+
+        config CUBE32_SERVO2_MIN_PULSE_US
+            int "Servo 2 Min Pulse Width (µs)"
+            default 500
+            range 100 2500
+            depends on CUBE32_SERVO_ENABLED && CUBE32_SERVO_NUM_CHANNELS = 2
+            help
+                Minimum pulse width in microseconds (0° position).
+
+        config CUBE32_SERVO2_MAX_PULSE_US
+            int "Servo 2 Max Pulse Width (µs)"
+            default 2500
+            range 500 3000
+            depends on CUBE32_SERVO_ENABLED && CUBE32_SERVO_NUM_CHANNELS = 2
+            help
+                Maximum pulse width in microseconds (max° position).
+    endmenu
+
+    menu "Robot Head Configuration"
+        config CUBE32_ROBOT_HEAD_ENABLED
+            bool "Enable Robot Head Action Engine"
+            default n
+            depends on CUBE32_SERVO_ENABLED && CUBE32_SERVO_NUM_CHANNELS = 2
+            help
+                Enable the robot head simulation action engine.
+                Uses 2 servos as a pan/tilt chassis for head expressions
+                such as nod, shake, curious, and attention.
+                Requires PWM Servo with 2 channels enabled.
+
+        config CUBE32_ROBOT_HEAD_PAN_CHANNEL
+            int "Pan Servo Channel (horizontal)"
+            default 0
+            range 0 1
+            depends on CUBE32_ROBOT_HEAD_ENABLED
+            help
+                Servo channel for horizontal pan (head turning left/right).
+
+        config CUBE32_ROBOT_HEAD_TILT_CHANNEL
+            int "Tilt Servo Channel (vertical)"
+            default 1
+            range 0 1
+            depends on CUBE32_ROBOT_HEAD_ENABLED
+            help
+                Servo channel for vertical tilt (head nodding up/down).
+
+        config CUBE32_ROBOT_HEAD_PAN_CENTER
+            int "Pan Center Angle (degrees)"
+            default 90
+            range 0 360
+            depends on CUBE32_ROBOT_HEAD_ENABLED
+            help
+                Center (forward-facing) position for pan servo in degrees.
+                For 360° continuous servos, 90 = stop.
+
+        config CUBE32_ROBOT_HEAD_TILT_CENTER
+            int "Tilt Center Angle (degrees)"
+            default 90
+            range 0 180
+            depends on CUBE32_ROBOT_HEAD_ENABLED
+            help
+                Center (level) position for tilt servo in degrees.
+
+        config CUBE32_ROBOT_HEAD_TILT_MIN
+            int "Tilt Minimum Angle (degrees)"
+            default 60
+            range 0 180
+            depends on CUBE32_ROBOT_HEAD_ENABLED
+            help
+                Minimum tilt angle allowed (physical limit of chassis).
+                This limits how far down the head can nod.
+
+        config CUBE32_ROBOT_HEAD_TILT_MAX
+            int "Tilt Maximum Angle (degrees)"
+            default 120
+            range 0 180
+            depends on CUBE32_ROBOT_HEAD_ENABLED
+            help
+                Maximum tilt angle allowed (physical limit of chassis).
+                This limits how far up the head can tilt.
+
+        config CUBE32_ROBOT_HEAD_PAN_SPEED
+            int "Pan Speed Limit (1-100%)"
+            default 50
+            range 1 100
+            depends on CUBE32_ROBOT_HEAD_ENABLED
+            help
+                Global speed scaling for pan (horizontal) movements.
+                Keyframe speeds are multiplied by this percentage.
+                Lower values make pan movements slower and smoother,
+                reducing mechanical instability of the chassis.
+
+        config CUBE32_ROBOT_HEAD_TILT_SPEED
+            int "Tilt Speed Limit (1-100%)"
+            default 50
+            range 1 100
+            depends on CUBE32_ROBOT_HEAD_ENABLED
+            help
+                Global speed scaling for tilt (vertical) movements.
+                Keyframe speeds are multiplied by this percentage.
+                Lower values make tilt movements slower and smoother.
+    endmenu
+
+    menu "Robot Face Expression Configuration"
+        config CUBE32_FACE_EXPRESSION_ENABLED
+            bool "Enable Robot Face Expression Display"
+            default n
+            depends on CUBE32_LVGL_ENABLED
+            help
+                Enable the robot face expression display engine.
+                Renders animated two-eye face on the LVGL display with
+                expressions that synchronize with robot head actions.
+                Includes idle behavior with periodic blinks and
+                random micro-saccades for a living-face effect.
+                Requires LVGL display to be enabled.
+    endmenu
+
+    menu "IMU Configuration"
+        config CUBE32_IMU_ENABLED
+            bool "Enable IMU (LSM6DSO)"
+            default n
+            help
+                Enable 6-axis IMU (accelerometer + gyroscope) driver initialization.
+                Uses the LSM6DSO sensor via I2C at address 0x6A.
+
+        config CUBE32_IMU_MLC_ENABLED
+            bool "Enable Machine Learning Core (MLC)"
+            default n
+            depends on CUBE32_IMU_ENABLED
+            help
+                Enable the LSM6DSOX Machine Learning Core (MLC) support.
+                MLC runs on-sensor decision tree inference for activity
+                recognition, gesture detection, and other classification tasks.
+                UCF configuration files are loaded at runtime to program the
+                decision trees. MLC output is polled (no INT pins on CUBE32).
+
+        config CUBE32_MLC_DEBUG
+            bool "MLC diagnostic logging"
+            default n
+            depends on CUBE32_IMU_MLC_ENABLED
+            help
+                Enable verbose MLC register dump at startup.
+                Logs CTRL1_XL, EMB_FUNC_EN_B, program memory
+                readback, etc. Useful for debugging UCF loading.
+    endmenu
+
+    menu "Magnetometer Configuration"
+        config CUBE32_MAG_ENABLED
+            bool "Enable Magnetometer (LIS3MDL)"
+            default n
+            help
+                Enable 3-axis magnetometer driver initialization.
+                Uses the LIS3MDL sensor via I2C at address 0x1C.
+    endmenu
+
+    menu "USB Input Configuration"
+        config CUBE32_USB_INPUT_ENABLED
+            bool "Enable USB Input (Keyboard/Mouse)"
+            default n
+            help
+                Enable USB Host HID driver for keyboard and mouse input.
+                Uses the ESP32-S3 built-in USB Host controller.
+                
+                NOTE: USB Input and USB Modem (with USB connection) cannot be
+                used at the same time as they both require the USB Host controller.
+                Use UART connection for modem if USB Input is needed.
+                
+                Features:
+                - USB HID Keyboard support (boot protocol)
+                - USB HID Mouse support (boot protocol)
+                - Event queues for keyboard and mouse events
+                - Thread-safe operation
+                
+                NOTE: USB Hubs are NOT supported. Connect devices directly.
+
+        config CUBE32_USB_INPUT_KEYBOARD
+            bool "Enable USB Keyboard"
+            default y
+            depends on CUBE32_USB_INPUT_ENABLED
+            help
+                Enable USB HID keyboard support.
+                Keyboard events are processed using boot protocol for
+                maximum compatibility with standard keyboards.
+
+        config CUBE32_USB_INPUT_MOUSE
+            bool "Enable USB Mouse"
+            default y
+            depends on CUBE32_USB_INPUT_ENABLED
+            help
+                Enable USB HID mouse support.
+                Mouse events are processed using boot protocol for
+                maximum compatibility with standard mice.
+
+        config CUBE32_USB_INPUT_LVGL_MOUSE
+            bool "Add USB Mouse to LVGL"
+            default y
+            depends on CUBE32_USB_INPUT_ENABLED && CUBE32_USB_INPUT_MOUSE && CUBE32_LVGL_ENABLED
+            help
+                Automatically add USB mouse input device to LVGL.
+                When enabled, USB mouse will control the LVGL cursor
+                and can interact with LVGL widgets.
+                
+                A red circular cursor will be shown to indicate mouse position.
+    endmenu
+
+endmenu
+

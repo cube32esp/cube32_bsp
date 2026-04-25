@@ -1,0 +1,47 @@
+# ESP-IDF build output
+build/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+
+# ESP-IDF managed components (fetched on build)
+managed_components/
+
+# Compiled artifacts
+*.elf
+*.bin
+*.map
+*.a
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# VS Code
+.vscode/
+
+# JetBrains / CLion
+.idea/
+cmake-build-*/
+
+# Eclipse
+.project
+.cproject
+.settings/
+
+# Logs
+*.log
+
+# Temporary files
+*.swp
+*.swo
+*~

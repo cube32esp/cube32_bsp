@@ -1,0 +1,101 @@
+## CUBE32 Board Support Package
+version: "0.0.1"
+description: "CUBE32 Board Support Package for ESP32-S3 — AI-ready hardware drivers for display, touch, IMU, audio, camera, LTE modem, PMU, RTC, and more"
+url: "https://github.com/cube32esp/cube32_bsp"
+repository: "https://github.com/cube32esp/cube32_bsp.git"
+issues: "https://github.com/cube32esp/cube32_bsp/issues"
+
+license: "MIT"
+
+targets:
+  - esp32s3
+
+tags:
+  - bsp
+  - esp32s3
+  - display
+  - camera
+  - audio
+  - imu
+  - modem
+  - lvgl
+  - iot
+  - touch
+  - pmu
+
+files:
+  exclude:
+    - "test/**"
+    - ".github/**"
+
+dependencies:
+  ## Required IDF version
+  idf:
+    version: ">=5.4.0"
+
+  ## Power management
+  XPowersLib:
+    git: "https://github.com/lewisxhe/XPowersLib.git"
+
+  ## Display drivers
+  espressif/esp_lcd_ili9341: "==1.2.0"
+  espressif/esp_lcd_gc9a01: "==2.0.1"
+  espressif/esp_lcd_st77916: "^1.0.1"
+  espressif/esp_lcd_axs15231b: "^1.0.0"
+  espressif/esp_lcd_st7701:
+    version: "^1.1.4"
+    rules:
+      - if: "target in [esp32s3, esp32p4]"
+  espressif/esp_lcd_st7796:
+    version: "1.3.5"
+    rules:
+      - if: "target in [esp32, esp32s2, esp32s3, esp32p4]"
+  espressif/esp_lcd_spd2010: "==1.0.2"
+  espressif/esp_lcd_panel_io_additions: "^1.0.1"
+  78/esp_lcd_nv3023: "~1.0.0"
+
+  ## Touch drivers
+  espressif/esp_lcd_touch_ft5x06: "~1.0.7"
+  espressif/esp_lcd_touch_gt911: "^1"
+  espressif/esp_lcd_touch_gt1151: "^1"
+  espressif/esp_lcd_touch_cst816s: "^1.0.6"
+
+  ## IO Expander
+  espressif/esp_io_expander_tca9554: "==2.0.0"
+  espressif/esp_io_expander_tca95xx_16bit: "^2.0.0"
+
+  ## LVGL
+  lvgl/lvgl: "~9.3.0"
+  espressif/esp_lvgl_port: "~2.6.0"
+
+  ## Audio
+  espressif/esp_codec_dev: "~1.4.0"
+  espressif/adc_mic: "^0.2.1"
+  78/esp-opus-encoder: "~2.4.1"
+  chmorgan/esp-libhelix-mp3: "^1.0.3"
+
+  ## Camera
+  espressif/esp32-camera: "~2.1.2"
+
+  ## WiFi provisioning helper
+  78/esp-wifi-connect: "~2.6.0"
+
+  ## Modem
+  espressif/esp_modem: "^1.0.0"
+  espressif/esp_modem_usb_dte:
+    version: "^1.3.0"
+    rules:
+      - if: "idf_version >=4.4"
+      - if: "target in [esp32s2, esp32s3, esp32p4]"
+  espressif/usb_host_cdc_acm:
+    version: "^2.0.4"
+    rules:
+      - if: "target in [esp32s2, esp32s3, esp32p4]"
+
+  ## Buttons
+  espressif/button: "^4.1.3"
+
+  ## NOTE: espressif/esp-sr is intentionally excluded from the BSP.
+  ## It adds ~8 MB to the binary and is only needed for speech recognition / AEC apps.
+  ## To use speech recognition, add to your project's idf_component.yml:
+  ##   espressif/esp-sr: "~2.1.5"
