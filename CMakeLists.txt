@@ -56,7 +56,7 @@ idf_component_register(
     REQUIRES
         lvgl
         esp_lvgl_port
-        XPowersLib
+        cube32esp__xpowerslib
         esp32-camera
         fatfs
         sdmmc
