@@ -9,9 +9,6 @@ jobs:
   upload:
     name: Upload component
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write   # Required for OIDC authentication with the registry
-      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -21,3 +18,4 @@ jobs:
         with:
           components: "cube32_bsp: ."
           namespace: "cube32esp"
+          api_token: ${{ secrets.IDF_COMPONENT_API_TOKEN }}
