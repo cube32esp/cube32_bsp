@@ -1,5 +1,5 @@
 ## CUBE32 Board Support Package
-version: "0.0.1"
+version: "0.0.2"
 description: "CUBE32 Board Support Package for ESP32-S3 — AI-ready hardware drivers for display, touch, IMU, audio, camera, LTE modem, PMU, RTC, and more"
 url: "https://github.com/cube32esp/cube32_bsp"
 repository: "https://github.com/cube32esp/cube32_bsp.git"
@@ -34,8 +34,7 @@ dependencies:
     version: ">=5.4.0"
 
   ## Power management
-  XPowersLib:
-    git: "https://github.com/lewisxhe/XPowersLib.git"
+  cube32esp/XPowersLib: "*"
 
   ## Display drivers
   espressif/esp_lcd_ili9341: "==1.2.0"
