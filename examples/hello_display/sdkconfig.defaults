@@ -1,0 +1,61 @@
+# CUBE32 sdkconfig.defaults — hello_display
+# Minimal configuration: display only. No LVGL, Touch, IMU, Audio, BT, Camera, or WiFi.
+# Applied first by ESP-IDF; target-specific overrides go in sdkconfig.defaults.<target>
+
+# ---------------------------------------------------------------------------
+# Compiler
+# ---------------------------------------------------------------------------
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+CONFIG_COMPILER_CXX_EXCEPTIONS_EMG_POOL_SIZE=1024
+CONFIG_COMPILER_CXX_RTTI=y
+
+# ---------------------------------------------------------------------------
+# Bootloader
+# ---------------------------------------------------------------------------
+CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
+CONFIG_BOOTLOADER_SKIP_VALIDATE_ALWAYS=y
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# ---------------------------------------------------------------------------
+# Partition table — standard CUBE32 16 MB layout (OTA + 8 MB assets)
+# ---------------------------------------------------------------------------
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# ---------------------------------------------------------------------------
+# FreeRTOS
+# ---------------------------------------------------------------------------
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# ---------------------------------------------------------------------------
+# Newlib — smaller footprint
+# ---------------------------------------------------------------------------
+CONFIG_NEWLIB_NANO_FORMAT=y
+
+# ---------------------------------------------------------------------------
+# UART ISR in IRAM — prevents UART FIFO overflow during flash operations
+# ---------------------------------------------------------------------------
+CONFIG_UART_ISR_IN_IRAM=y
+
+# ---------------------------------------------------------------------------
+# CUBE32 Board / Display
+# ---------------------------------------------------------------------------
+CONFIG_CUBE32_BOARD_S3_CORE=y
+CONFIG_CUBE32_DISPLAY_ENABLED=y
+CONFIG_CUBE32_DISPLAY_CUBE_TFT_TOUCH_154=y
+
+# ---------------------------------------------------------------------------
+# Disable unused CUBE32 subsystems
+# ---------------------------------------------------------------------------
+CONFIG_CUBE32_LVGL_ENABLED=n
+CONFIG_CUBE32_TOUCH_ENABLED=n
+CONFIG_CUBE32_AUDIO_ENABLED=n
+CONFIG_CUBE32_IMU_ENABLED=n
+CONFIG_CUBE32_MAG_ENABLED=n
+CONFIG_CUBE32_BLE_OTA_ENABLED=n

@@ -97,9 +97,10 @@ cube32_result_t ST7789Display::begin(const cube32_st7789_config_t& config) {
     // - LVGL's LvglDisplay::setRotation() will apply prism mode after setting rotation
     // - For non-LVGL use, call setPrismMode() manually after initialization
 
-    // Note: Display panel and backlight are kept OFF here to prevent white flash
-    // If using LVGL: LVGL driver will turn them on after first frame is drawn
-    // If not using LVGL: Call displayOn() to turn on display and backlight
+    // Note: Display panel and backlight are kept OFF here to prevent white flash during boot.
+    // The first successful call to any draw function (fillRect, drawPixel, drawBitmap) will
+    // automatically call displayOn() so the screen comes on only after real pixels are ready.
+    // When using LVGL: esp_lvgl_port does this via on_color_trans_done callback instead.
 
     return CUBE32_OK;
 }
@@ -575,6 +576,7 @@ cube32_result_t ST7789Display::drawPixel(uint16_t x, uint16_t y, uint16_t color)
     }
 
     esp_err_t ret = esp_lcd_panel_draw_bitmap(m_panel_handle, x, y, x + 1, y + 1, &color);
+    if (ret == ESP_OK) autoDisplayOn();
     return esp_err_to_cube32(ret);
 }
 
@@ -594,23 +596,36 @@ cube32_result_t ST7789Display::fillRect(uint16_t x_start, uint16_t y_start,
 
     uint16_t width = x_end - x_start;
     uint16_t height = y_end - y_start;
-    size_t buffer_size = width * height * sizeof(uint16_t);
 
-    // Allocate buffer in DMA-capable memory
-    uint16_t* buffer = (uint16_t*)heap_caps_malloc(buffer_size, MALLOC_CAP_DMA);
+    // Use a fixed-size strip buffer to avoid large contiguous DMA allocations.
+    // A full 240x240x2 = 115200 byte single allocation can fail; strips are safe.
+    const size_t MAX_STRIP_BYTES = 8192;
+    uint16_t strip_rows = (uint16_t)(MAX_STRIP_BYTES / (width * sizeof(uint16_t)));
+    if (strip_rows == 0) strip_rows = 1;
+    if (strip_rows > height) strip_rows = height;
+
+    size_t strip_size = width * strip_rows * sizeof(uint16_t);
+    uint16_t* buffer = (uint16_t*)heap_caps_malloc(strip_size, MALLOC_CAP_DMA);
     if (!buffer) {
-        ESP_LOGE(TAG, "Failed to allocate fill buffer (%zu bytes)", buffer_size);
+        ESP_LOGE(TAG, "Failed to allocate fill buffer (%u bytes)", (unsigned int)strip_size);
         return CUBE32_NO_MEM;
     }
 
-    // Fill buffer with color
-    for (size_t i = 0; i < width * height; i++) {
+    // Pre-fill strip buffer with color
+    for (size_t i = 0; i < (size_t)(width * strip_rows); i++) {
         buffer[i] = color;
     }
 
-    esp_err_t ret = esp_lcd_panel_draw_bitmap(m_panel_handle, x_start, y_start, x_end, y_end, buffer);
-    
+    esp_err_t ret = ESP_OK;
+    for (uint16_t y = y_start; y < y_end; y += strip_rows) {
+        uint16_t y_strip_end = y + strip_rows;
+        if (y_strip_end > y_end) y_strip_end = y_end;
+        ret = esp_lcd_panel_draw_bitmap(m_panel_handle, x_start, y, x_end, y_strip_end, buffer);
+        if (ret != ESP_OK) break;
+    }
+
     heap_caps_free(buffer);
+    if (ret == ESP_OK) autoDisplayOn();
     return esp_err_to_cube32(ret);
 }
 
@@ -626,7 +641,15 @@ cube32_result_t ST7789Display::drawBitmap(uint16_t x_start, uint16_t y_start,
     }
 
     esp_err_t ret = esp_lcd_panel_draw_bitmap(m_panel_handle, x_start, y_start, x_end, y_end, data);
+    if (ret == ESP_OK) autoDisplayOn();
     return esp_err_to_cube32(ret);
+}
+
+void ST7789Display::autoDisplayOn() {
+    if (!m_display_on) {
+        displayOn();
+        m_display_on = true;
+    }
 }
 
 } // namespace cube32

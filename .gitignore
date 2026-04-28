@@ -32,6 +32,9 @@ __pycache__/
 # VS Code
 .vscode/
 
+# Local-only Copilot skills (not published to repo)
+.agents/skills/
+
 # JetBrains / CLion
 .idea/
 cmake-build-*/

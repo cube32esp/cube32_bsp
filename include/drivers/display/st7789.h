@@ -307,6 +307,7 @@ private:
     cube32_result_t initReset();
     cube32_result_t initPanelIO();
     cube32_result_t initPanel();
+    void autoDisplayOn();  ///< Turn on display after first successful draw (once only)
 
     esp_lcd_panel_handle_t m_panel_handle = nullptr;
     esp_lcd_panel_io_handle_t m_io_handle = nullptr;
@@ -315,6 +316,7 @@ private:
     uint16_t m_effective_height = 0;  ///< Effective height after rotation
     bool m_initialized = false;
     bool m_prism_mode = false;        ///< Prism/mirror mode state
+    bool m_display_on = false;        ///< Tracks whether displayOn() has been called
 };
 
 } // namespace cube32
