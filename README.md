@@ -161,8 +161,12 @@ See `examples/hello_world/partitions/partitions.csv` for the full CSV definition
 | Example | Description |
 |---|---|
 | [`hello_world`](examples/hello_world/) | Interactive 3D cube (IMU gyro + touch) and driver status screen |
-
-More examples are coming in future releases (display, camera, audio, BLE OTA, and more).
+| [`hello_display`](examples/hello_display/) | LVGL display demo — widgets, animations, and touch input |
+| [`hello_camera`](examples/hello_camera/) | OV2640 camera capture streamed live to the TFT display |
+| [`hello_audio_player`](examples/hello_audio_player/) | WAV and MP3 playback from SD card with LVGL file browser UI |
+| [`hello_audio_recorder`](examples/hello_audio_recorder/) | Microphone recording to WAV on SD card with LVGL record/play controls |
+| [`hello_aec_test`](examples/hello_aec_test/) | Acoustic Echo Cancellation comparison — records three WAV files in different AEC modes |
+| [`hello_rtc_ntp`](examples/hello_rtc_ntp/) | BM8563 RTC synced via NTP over WiFi or LTE modem (A7670) with LVGL clock UI |
 
 ---
 
