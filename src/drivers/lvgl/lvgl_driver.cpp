@@ -160,8 +160,10 @@ cube32_result_t LvglDisplay::addDisplay(const cube32_lvgl_config_t& config) {
     uint32_t buffer_size = config.buffer_size;
     if (buffer_size == 0) {
         // Auto calculate: use percentage of screen size
-        buffer_size = base_width * base_height * sizeof(lv_color_t) * CUBE32_LVGL_BUFFER_SIZE_PERCENT / 100;
-        ESP_LOGI(TAG, "Auto-calculated buffer size: %" PRIu32 " bytes", buffer_size);
+        // NOTE: lvgl_port_display_cfg_t::buffer_size is in PIXELS, not bytes.
+        // esp_lvgl_port multiplies by color_bytes internally when allocating.
+        buffer_size = base_width * base_height * CUBE32_LVGL_BUFFER_SIZE_PERCENT / 100;
+        ESP_LOGI(TAG, "Auto-calculated buffer size: %" PRIu32 " pixels", buffer_size);
     }
 
     // Configure display
@@ -200,7 +202,7 @@ cube32_result_t LvglDisplay::addDisplay(const cube32_lvgl_config_t& config) {
     disp_cfg.flags.direct_mode = config.direct_mode;
 
     ESP_LOGI(TAG, "Adding display to LVGL...");
-    ESP_LOGI(TAG, "  Buffer size: %" PRIu32 " bytes", buffer_size);
+    ESP_LOGI(TAG, "  Buffer size: %" PRIu32 " pixels", buffer_size);
     ESP_LOGI(TAG, "  Double buffer: %s", config.double_buffer ? "yes" : "no");
     ESP_LOGI(TAG, "  DMA buffer: %s", disp_cfg.flags.buff_dma ? "yes" : "no");
     ESP_LOGI(TAG, "  SPIRAM buffer: %s", disp_cfg.flags.buff_spiram ? "yes" : "no");
