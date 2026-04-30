@@ -1,5 +1,5 @@
 ## CUBE32 Board Support Package
-version: "0.0.8"
+version: "0.0.9"
 description: "CUBE32 Board Support Package for ESP32-S3 — AI-ready hardware drivers for display, touch, IMU, audio, camera, LTE modem, PMU, RTC, and more"
 url: "https://github.com/cube32esp/cube32_bsp"
 repository: "https://github.com/cube32esp/cube32_bsp.git"
@@ -65,7 +65,7 @@ dependencies:
 
   ## LVGL
   lvgl/lvgl: "~9.5.0"
-  espressif/esp_lvgl_port: "~2.6.0"
+  espressif/esp_lvgl_port: "~2.7.2"
 
   ## Audio
   espressif/esp_codec_dev: "~1.5.6"
@@ -74,7 +74,7 @@ dependencies:
   chmorgan/esp-libhelix-mp3: "^1.0.3"
 
   ## Camera
-  espressif/esp32-camera: "~2.1.6"
+  espressif/esp32-camera: "^2.1.6"
 
   ## WiFi provisioning helper
   78/esp-wifi-connect: "~3.1.2"
