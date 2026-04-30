@@ -1,5 +1,4 @@
-# CUBE32 sdkconfig.defaults — hello_display
-# Minimal configuration: display only. No LVGL, Touch, IMU, Audio, Camera, or WiFi.
+# CUBE32 sdkconfig.defaults — hello_camera
 # Applied first by ESP-IDF; target-specific overrides go in sdkconfig.defaults.<target>
 
 # ---------------------------------------------------------------------------
@@ -49,7 +48,7 @@ CONFIG_UART_ISR_IN_IRAM=y
 CONFIG_CUBE32_BOARD_S3_CORE=y
 
 # ---------------------------------------------------------------------------
-# CUBE32 Subsystems — enable what this example uses; disable the rest
+# CUBE32 Subsystems
 # ---------------------------------------------------------------------------
 CONFIG_CUBE32_DISPLAY_ENABLED=y
 CONFIG_CUBE32_DISPLAY_CUBE_TFT_TOUCH_154=y
@@ -60,10 +59,21 @@ CONFIG_CUBE32_IMU_ENABLED=n
 CONFIG_CUBE32_MAG_ENABLED=n
 CONFIG_CUBE32_AUDIO_ENABLED=n
 CONFIG_CUBE32_SDCARD_ENABLED=n
-CONFIG_CUBE32_CAMERA_ENABLED=n
+CONFIG_CUBE32_CAMERA_ENABLED=y
 CONFIG_CUBE32_MODEM_ENABLED=n
-CONFIG_CUBE32_PMU_ENABLED=y        # always on — system power depends on AXP2101
-CONFIG_CUBE32_BLE_OTA_ENABLED=y    # always on — allows communication with CUBE32 mobile app
+CONFIG_CUBE32_PMU_ENABLED=y
+CONFIG_CUBE32_BLE_OTA_ENABLED=y
+CONFIG_CUBE32_ADC_BUTTON_ENABLED=n
+
+# ---------------------------------------------------------------------------
+# [OPTIONAL] Camera — DMA tuning for camera frame capture
+# NOTE: DMA_BUFFER_SIZE_MAX must divide the camera frame line size evenly,
+# otherwise cam_hal reports "FB-SIZE: X != Y" and frame capture times out.
+# 8192 is the proven value for CUBE32 camera frame sizes (QQVGA/QVGA RGB565).
+# Do NOT raise this without verifying alignment with the active frame size.
+# ---------------------------------------------------------------------------
+CONFIG_CAMERA_NO_AFFINITY=y
+CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=8192
 
 # ---------------------------------------------------------------------------
 # [ALWAYS ON] Bluetooth — NimBLE required by CUBE32_BLE_OTA_ENABLED

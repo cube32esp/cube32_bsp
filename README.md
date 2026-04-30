@@ -77,16 +77,6 @@ extern "C" void app_main(void)
     lv_obj_center(label);
     lvgl.unlock();
 
-    // Read IMU
-    cube32::IMU &imu = cube32::IMU::instance();
-    while (true) {
-        float ax, ay, az, gx, gy, gz;
-        imu.getAccel(ax, ay, az);
-        imu.getGyro(gx, gy, gz);
-        ESP_LOGI("app", "Accel: %.2f, %.2f, %.2f  Gyro: %.2f, %.2f, %.2f",
-                 ax, ay, az, gx, gy, gz);
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
 }
 ```
 

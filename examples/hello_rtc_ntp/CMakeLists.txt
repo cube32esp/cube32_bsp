@@ -8,4 +8,4 @@ cmake_minimum_required(VERSION 3.16)
 # Pull in ESP-IDF cmake infrastructure
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-project(hello_world)
+project(hello_rtc_ntp)

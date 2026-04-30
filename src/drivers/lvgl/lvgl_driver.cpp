@@ -211,6 +211,10 @@ cube32_result_t LvglDisplay::addDisplay(const cube32_lvgl_config_t& config) {
         return CUBE32_NO_MEM;
     }
 
+    // LVGL 9.5: explicitly set as default display so new screens/objects
+    // bind to this display when multiple displays may exist.
+    lv_display_set_default(m_display);
+
     ESP_LOGI(TAG, "Display added to LVGL successfully");
 
     return CUBE32_OK;
