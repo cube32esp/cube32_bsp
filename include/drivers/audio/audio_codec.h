@@ -55,6 +55,14 @@ namespace cube32 {
 // ============================================================================
 
 /**
+ * @brief ADC microphone input source
+ */
+enum class AdcSource {
+    ES7210 = 0,  ///< ES7210 dedicated 4-ch TDM ADC (default, HW AEC supported)
+    ES8311 = 1,  ///< ES8311 codec ADC path (mono, no HW AEC)
+};
+
+/**
  * @brief AEC operating mode
  */
 enum class AecMode {
@@ -85,6 +93,11 @@ struct AudioCodecConfig {
     int output_volume = 70;              ///< Output volume (0-100)
     int input_gain = 30;                 ///< Input gain in dB
     AecMode aec_mode = AecMode::HW;      ///< AEC mode
+#endif
+#ifdef CUBE32_AUDIO_ADC_ES8311
+    AdcSource adc_source = AdcSource::ES8311; ///< ADC input source
+#else
+    AdcSource adc_source = AdcSource::ES7210; ///< ADC input source
 #endif
     
     // I2S GPIO pins
@@ -118,6 +131,7 @@ struct AudioCodecConfig {
     .output_volume = CONFIG_CUBE32_AUDIO_OUTPUT_VOLUME, \
     .input_gain = CONFIG_CUBE32_AUDIO_INPUT_GAIN, \
     .aec_mode = cube32::AudioCodecConfig{}.aec_mode, \
+    .adc_source = cube32::AudioCodecConfig{}.adc_source, \
     .mclk_pin = (gpio_num_t)CUBE32_AUDIO_I2S_MCLK_PIN, \
     .bclk_pin = (gpio_num_t)CUBE32_AUDIO_I2S_BCLK_PIN, \
     .lrck_pin = (gpio_num_t)CUBE32_AUDIO_I2S_LRCK_PIN, \
@@ -137,6 +151,7 @@ struct AudioCodecConfig {
     .output_volume = 70, \
     .input_gain = 30, \
     .aec_mode = cube32::AecMode::HW, \
+    .adc_source = cube32::AudioCodecConfig{}.adc_source, \
     .mclk_pin = (gpio_num_t)CUBE32_AUDIO_I2S_MCLK_PIN, \
     .bclk_pin = (gpio_num_t)CUBE32_AUDIO_I2S_BCLK_PIN, \
     .lrck_pin = (gpio_num_t)CUBE32_AUDIO_I2S_LRCK_PIN, \
@@ -273,7 +288,10 @@ public:
 
     int getInputSampleRate() const { return m_config.input_sample_rate; }
     int getOutputSampleRate() const { return m_config.output_sample_rate; }
-    int getInputChannels() const { return m_aec_mode == AecMode::HW ? 2 : 1; }
+    int getInputChannels() const {
+        if (m_config.adc_source == AdcSource::ES8311) return 1;
+        return m_aec_mode == AecMode::HW ? 2 : 1;
+    }
     bool isDuplex() const { return true; }
     AecMode getAecMode() const { return m_aec_mode; }
     bool hasInputReference() const { return m_aec_mode == AecMode::HW; }
@@ -327,6 +345,11 @@ private:
      * @brief Initialize IO expander for PA control
      */
     cube32_result_t initPAControl();
+
+    /**
+     * @brief Initialize ES8311 ADC input codec (used when CUBE32_AUDIO_ADC_ES8311 is defined)
+     */
+    cube32_result_t initInputCodecES8311();
 
     /**
      * @brief Enable/disable PA via IO expander (internal implementation)

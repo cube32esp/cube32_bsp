@@ -28,3 +28,9 @@ CONFIG_SPIRAM_MEMTEST=n
 # ---------------------------------------------------------------------------
 CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
+# ---------------------------------------------------------------------------
+# [ALWAYS ON] Bluetooth — NimBLE required by CUBE32_BLE_OTA_ENABLED
+# ---------------------------------------------------------------------------
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+CONFIG_BT_NIMBLE_PINNED_TO_CORE_1=y

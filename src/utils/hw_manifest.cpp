@@ -11,6 +11,7 @@
 #include "utils/i2c_bus.h"
 #include "utils/config_manager.h"
 #include "drivers/touch/touch.h"
+#include "cube32_config.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -164,8 +165,14 @@ cube32_result_t cube32_hw_manifest_scan(cube32_hw_manifest_t* m)
 
     /* Audio module: both DAC + ADC must be present */
     m->audio_dac_present = found(CUBE32_I2C_ADDR_ES8311);
-    m->audio_adc_present = found(CUBE32_I2C_ADDR_ES7210);
+#ifdef CUBE32_AUDIO_ADC_ES8311
+    // ES8311 handles both DAC and ADC — ES7210 is absent by design
+    m->audio_adc_present    = m->audio_dac_present;  // same chip
+    m->audio_module_present = m->audio_dac_present;
+#else
+    m->audio_adc_present    = found(CUBE32_I2C_ADDR_ES7210);
     m->audio_module_present = m->audio_dac_present && m->audio_adc_present;
+#endif
 
     /* Modem module: TCA9554 at 0x22 */
     m->modem_module_present = found(CUBE32_I2C_ADDR_TCA9554_MODEM);
@@ -321,10 +328,17 @@ void cube32_hw_manifest_print(const cube32_hw_manifest_t* m)
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %s @ 0x%02X", "Touch",
              m->touch_built ? "YES" : "no", m->touch_present ? "YES" : "no", "  --  ",
              touch_ic_name(m->touch_ic), m->touch_i2c_addr);
+#ifdef CUBE32_AUDIO_ADC_ES8311
+    ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | ES8311@0x%02X (DAC+ADC)  IOX@0x%02X", "Audio",
+             m->audio_built ? "YES" : "no", m->audio_module_present ? "YES" : "no",
+             m->audio_active ? "YES" : "no",
+             CUBE32_I2C_ADDR_ES8311, CUBE32_I2C_ADDR_TCA9554_AUDIO);
+#else
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | ES8311@0x%02X  ES7210@0x%02X  IOX@0x%02X", "Audio",
              m->audio_built ? "YES" : "no", m->audio_module_present ? "YES" : "no",
              m->audio_active ? "YES" : "no",
              CUBE32_I2C_ADDR_ES8311, CUBE32_I2C_ADDR_ES7210, CUBE32_I2C_ADDR_TCA9554_AUDIO);
+#endif
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | IOX@0x%02X", "Modem",
              m->modem_built ? "YES" : "no", m->modem_module_present ? "YES" : "no",
              m->modem_active ? "YES" : "no", CUBE32_I2C_ADDR_TCA9554_MODEM);
@@ -434,10 +448,17 @@ void cube32_hw_manifest_print_init_status(const cube32_hw_manifest_t* m)
              m->touch_built ? "YES" : "no", m->touch_present ? "YES" : "no",
              "  --  ", INIT_STR(CUBE32_DRV_TOUCH),
              touch_ic_name(m->touch_ic), m->touch_i2c_addr);
+#ifdef CUBE32_AUDIO_ADC_ES8311
+    ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s | ES8311@0x%02X (DAC+ADC)  IOX@0x%02X", "Audio",
+             m->audio_built ? "YES" : "no", m->audio_module_present ? "YES" : "no",
+             m->audio_active ? "YES" : "no", INIT_STR(CUBE32_DRV_AUDIO),
+             CUBE32_I2C_ADDR_ES8311, CUBE32_I2C_ADDR_TCA9554_AUDIO);
+#else
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s | ES8311@0x%02X  ES7210@0x%02X  IOX@0x%02X", "Audio",
              m->audio_built ? "YES" : "no", m->audio_module_present ? "YES" : "no",
              m->audio_active ? "YES" : "no", INIT_STR(CUBE32_DRV_AUDIO),
              CUBE32_I2C_ADDR_ES8311, CUBE32_I2C_ADDR_ES7210, CUBE32_I2C_ADDR_TCA9554_AUDIO);
+#endif
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s | IOX@0x%02X", "Modem",
              m->modem_built ? "YES" : "no", m->modem_module_present ? "YES" : "no",
              m->modem_active ? "YES" : "no", INIT_STR(CUBE32_DRV_MODEM),

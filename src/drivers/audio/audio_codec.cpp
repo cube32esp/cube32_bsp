@@ -55,6 +55,21 @@ cube32_result_t AudioCodec::begin(const AudioCodecConfig& config) {
     m_output_volume = config.output_volume;
     m_input_gain = config.input_gain;
 
+    // ES8311 ADC path: HW AEC is not supported — force to NONE
+    if (m_config.adc_source == AdcSource::ES8311 && m_aec_mode == AecMode::HW) {
+        ESP_LOGW(TAG, "HW AEC is not supported with ES8311 ADC; forcing AEC mode to NONE");
+        m_aec_mode = AecMode::NONE;
+        m_config.aec_mode = AecMode::NONE;
+    }
+
+    // ES8311 ADC: standard I2S RX shares BCLK/LRCK with TX, so input rate must match output rate
+    if (m_config.adc_source == AdcSource::ES8311 &&
+        m_config.input_sample_rate != m_config.output_sample_rate) {
+        ESP_LOGW(TAG, "ES8311 ADC: syncing input sample rate %d -> %d Hz (shared I2S clock)",
+                 m_config.input_sample_rate, m_config.output_sample_rate);
+        m_config.input_sample_rate = m_config.output_sample_rate;
+    }
+
     // Auto-clamp input sample rate to 16 kHz when AEC is enabled
     if (m_aec_mode != AecMode::NONE && m_config.input_sample_rate > 16000) {
         ESP_LOGW(TAG, "Clamping input sample rate from %d to 16000 Hz for AEC",
@@ -74,8 +89,12 @@ cube32_result_t AudioCodec::begin(const AudioCodecConfig& config) {
     ESP_LOGI(TAG, "  AEC mode: %s",
              m_aec_mode == AecMode::HW ? "HW" :
              m_aec_mode == AecMode::SW ? "SW" : "NONE");
+    ESP_LOGI(TAG, "  ADC source: %s",
+             m_config.adc_source == AdcSource::ES8311 ? "ES8311 (DAC+ADC)" : "ES7210 (dedicated ADC)");
     ESP_LOGI(TAG, "  ES8311 addr: 0x%02X, ES7210 addr: 0x%02X", 
              config.es8311_addr, config.es7210_addr);
+    ESP_LOGI(TAG, "  [DBG] free heap before audio init: %lu bytes",
+             (unsigned long)esp_get_free_heap_size());
 
     // Create I2S duplex channels
     cube32_result_t ret = createDuplexChannels();
@@ -110,11 +129,19 @@ cube32_result_t AudioCodec::begin(const AudioCodecConfig& config) {
         return ret;
     }
 
-    // Initialize ES7210 input codec
-    ret = initInputCodec();
-    if (ret != CUBE32_OK) {
-        ESP_LOGE(TAG, "Failed to initialize ES7210 input codec");
-        return ret;
+    // Initialize input codec (ES7210 or ES8311 ADC path)
+    if (m_config.adc_source == AdcSource::ES8311) {
+        ret = initInputCodecES8311();
+        if (ret != CUBE32_OK) {
+            ESP_LOGE(TAG, "Failed to initialize ES8311 ADC input");
+            return ret;
+        }
+    } else {
+        ret = initInputCodec();
+        if (ret != CUBE32_OK) {
+            ESP_LOGE(TAG, "Failed to initialize ES7210 input codec");
+            return ret;
+        }
     }
 
     // Initialize PA control via IO expander
@@ -126,6 +153,8 @@ cube32_result_t AudioCodec::begin(const AudioCodecConfig& config) {
 
     m_initialized = true;
     ESP_LOGI(TAG, "Audio codec initialized successfully");
+    ESP_LOGI(TAG, "  [DBG] free heap after audio init:  %lu bytes",
+             (unsigned long)esp_get_free_heap_size());
     return CUBE32_OK;
 }
 
@@ -273,7 +302,53 @@ cube32_result_t AudioCodec::createDuplexChannels() {
         ESP_LOGE(TAG, "Failed to init TX channel: %s", esp_err_to_name(err));
         return CUBE32_IO_ERROR;
     }
+    ESP_LOGI(TAG, "  [DBG] I2S TX (STD stereo) channel init OK");
 
+#ifdef CUBE32_AUDIO_ADC_ES8311
+    // Configure RX channel (input) - Standard I2S mode for ES8311 ADC.
+    // ES8311 has a single mic so RX is mono.  Note: esp_codec_dev_open()
+    // reconfigures the I2S slot/clock at runtime based on the codec's sample
+    // info, so the values set here are only the initial state.
+    i2s_std_config_t rx_std_cfg = {
+        .clk_cfg = {
+            .sample_rate_hz = (uint32_t)m_config.input_sample_rate,
+            .clk_src = I2S_CLK_SRC_DEFAULT,
+            .ext_clk_freq_hz = 0,
+            .mclk_multiple = I2S_MCLK_MULTIPLE_256
+        },
+        .slot_cfg = {
+            .data_bit_width = I2S_DATA_BIT_WIDTH_16BIT,
+            .slot_bit_width = I2S_SLOT_BIT_WIDTH_AUTO,
+            .slot_mode = I2S_SLOT_MODE_MONO,
+            .slot_mask = I2S_STD_SLOT_LEFT,
+            .ws_width = I2S_DATA_BIT_WIDTH_16BIT,
+            .ws_pol = false,
+            .bit_shift = true,
+            .left_align = true,
+            .big_endian = false,
+            .bit_order_lsb = false
+        },
+        .gpio_cfg = {
+            .mclk = m_config.mclk_pin,  // Keep MCLK routed (same as TDM path)
+            .bclk = m_config.bclk_pin,
+            .ws = m_config.lrck_pin,
+            .dout = I2S_GPIO_UNUSED,
+            .din = m_config.din_pin,
+            .invert_flags = {
+                .mclk_inv = false,
+                .bclk_inv = false,
+                .ws_inv = false
+            }
+        }
+    };
+
+    err = i2s_channel_init_std_mode(m_rx_handle, &rx_std_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to init RX channel (ES8311 std mode): %s", esp_err_to_name(err));
+        return CUBE32_IO_ERROR;
+    }
+    ESP_LOGI(TAG, "  [DBG] I2S RX (STD mono) channel init OK");
+#else
     // Configure RX channel (input) - TDM mode for ES7210 (4 channels)
     i2s_tdm_config_t tdm_cfg = {
         .clk_cfg = {
@@ -316,6 +391,8 @@ cube32_result_t AudioCodec::createDuplexChannels() {
         ESP_LOGE(TAG, "Failed to init RX channel: %s", esp_err_to_name(err));
         return CUBE32_IO_ERROR;
     }
+    ESP_LOGI(TAG, "  [DBG] I2S RX (TDM 4-ch) channel init OK");
+#endif
 
     ESP_LOGI(TAG, "I2S duplex channels created");
     return CUBE32_OK;
@@ -340,11 +417,20 @@ cube32_result_t AudioCodec::initOutputCodec() {
         return CUBE32_IO_ERROR;
     }
 
-    // Create ES8311 codec interface
+    // Create ES8311 codec interface.
+    // When ES8311 handles both DAC and ADC (CUBE32_AUDIO_ADC_ES8311), use BOTH mode so
+    // the chip is initialized ONCE with all paths enabled.  A second es8311_codec_new()
+    // in ADC-only mode would trigger a chip software-reset ("Work in Slave mode") that
+    // blows away the DAC register state set here — causing broken audio and, indirectly,
+    // LVGL DMA stalls that blank the display.  Using BOTH mode avoids the second init.
     es8311_codec_cfg_t es8311_cfg = {};
     es8311_cfg.ctrl_if = m_out_ctrl_if;
     es8311_cfg.gpio_if = m_gpio_if;
+#ifdef CUBE32_AUDIO_ADC_ES8311
+    es8311_cfg.codec_mode = ESP_CODEC_DEV_WORK_MODE_BOTH;  // DAC + ADC, one init
+#else
     es8311_cfg.codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC;
+#endif
     es8311_cfg.pa_pin = m_config.pa_pin;  // GPIO_NUM_NC since PA is controlled via TCA9554
     es8311_cfg.use_mclk = true;
     // Hardware gain settings - affects volume calculation
@@ -446,6 +532,40 @@ cube32_result_t AudioCodec::initInputCodec() {
 }
 
 // ============================================================================
+// ES8311 ADC Input Codec (used when CUBE32_AUDIO_ADC_ES8311 is defined)
+// ============================================================================
+
+cube32_result_t AudioCodec::initInputCodecES8311() {
+    // m_out_codec_if was created with WORK_MODE_BOTH in initOutputCodec(), so the
+    // ES8311 chip is already configured for both DAC and ADC in a single init.
+    // We simply create a second esp_codec_dev_handle pointing to the SAME codec_if
+    // as the output device.  No second I2C control interface or chip init is needed —
+    // that is what caused the chip software-reset and the subsequent display blank.
+    // m_in_ctrl_if and m_in_codec_if are left nullptr; end() skips deleting nullptr.
+    ESP_LOGI(TAG, "Initializing ES8311 ADC input (sharing DAC codec_if, WORK_MODE_BOTH)...");
+
+    if (m_out_codec_if == nullptr) {
+        ESP_LOGE(TAG, "ES8311 output codec_if not ready — call initOutputCodec() first");
+        return CUBE32_NOT_INITIALIZED;
+    }
+
+    // Reuse the BOTH-mode codec_if; only the device type differs.
+    esp_codec_dev_cfg_t dev_cfg = {
+        .dev_type = ESP_CODEC_DEV_TYPE_IN,
+        .codec_if = m_out_codec_if,  // shared — chip already init'd in BOTH mode
+        .data_if  = m_data_if,
+    };
+    m_input_dev = esp_codec_dev_new(&dev_cfg);
+    if (m_input_dev == nullptr) {
+        ESP_LOGE(TAG, "Failed to create ES8311 ADC input device");
+        return CUBE32_IO_ERROR;
+    }
+
+    ESP_LOGI(TAG, "ES8311 ADC input initialized (shared codec_if)");
+    return CUBE32_OK;
+}
+
+// ============================================================================
 // Input Control
 // ============================================================================
 
@@ -458,15 +578,18 @@ void AudioCodec::enableInput(bool enable) {
 
     if (enable) {
         ESP_LOGI(TAG, "Enabling audio input...");
+        // ES8311: 1 mic channel.  ES7210: 4 TDM channels (mic[0..3]).
+        int ch = (m_config.adc_source == AdcSource::ES8311) ? 1 : 4;
         esp_codec_dev_sample_info_t fs = {
             .bits_per_sample = 16,
-            .channel = 4,  // ES7210 has 4 channels
+            .channel = (uint8_t)ch,
             .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
             .sample_rate = (uint32_t)m_config.input_sample_rate,
             .mclk_multiple = 0,
         };
 
-        if (m_aec_mode == AecMode::HW) {
+        // HW AEC reference channel only valid for ES7210 (ch1 = speaker loopback)
+        if (m_config.adc_source == AdcSource::ES7210 && m_aec_mode == AecMode::HW) {
             fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
         }
 
@@ -476,10 +599,20 @@ void AudioCodec::enableInput(bool enable) {
             return;
         }
 
-        err = esp_codec_dev_set_in_channel_gain(m_input_dev, 
-            ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), m_input_gain);
+        // ES8311 is a single-mic codec — only the overall gain API is supported.
+        // esp_codec_dev_set_in_channel_gain() returns ESP_ERR_NOT_SUPPORTED for ES8311,
+        // leaving the PGA at 0 dB and producing a near-silent recording.
+        if (m_config.adc_source == AdcSource::ES8311) {
+            err = esp_codec_dev_set_in_gain(m_input_dev, (float)m_input_gain);
+        } else {
+            err = esp_codec_dev_set_in_channel_gain(m_input_dev,
+                ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), (float)m_input_gain);
+        }
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to set input gain: %s", esp_err_to_name(err));
+            ESP_LOGW(TAG, "Failed to set input gain (%d dB): %s",
+                     m_input_gain, esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "Input PGA gain set to %d dB", m_input_gain);
         }
 
         m_input_enabled = true;
@@ -495,8 +628,12 @@ void AudioCodec::enableInput(bool enable) {
 void AudioCodec::setInputGain(int gain) {
     m_input_gain = gain;
     if (m_input_enabled && m_input_dev != nullptr) {
-        esp_codec_dev_set_in_channel_gain(m_input_dev, 
-            ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), gain);
+        if (m_config.adc_source == AdcSource::ES8311) {
+            esp_codec_dev_set_in_gain(m_input_dev, (float)gain);
+        } else {
+            esp_codec_dev_set_in_channel_gain(m_input_dev,
+                ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), (float)gain);
+        }
     }
 }
 
@@ -510,6 +647,7 @@ int AudioCodec::read(int16_t* dest, int samples) {
         ESP_LOGW(TAG, "Read error: %s", esp_err_to_name(err));
         return 0;
     }
+
     return samples;
 }
 

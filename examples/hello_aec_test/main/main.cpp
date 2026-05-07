@@ -580,8 +580,8 @@ static void audio_record_task(void *arg) {
         {
             cube32::AudioCodecConfig cfg = CUBE32_AUDIO_CONFIG_DEFAULT();
             cfg.output_sample_rate = AEC_SAMPLE_RATE_HZ;
+            cfg.input_sample_rate  = AEC_SAMPLE_RATE_HZ;  // must match output for all modes; driver auto-clamp only fires when aec_mode != NONE
             cfg.aec_mode           = aec;
-            // input_sample_rate is auto-clamped to 16 kHz by driver when AEC enabled
             cube32_result_t r = codec.begin(cfg);
             if (r != CUBE32_OK) {
                 ESP_LOGE(TAG, "codec.begin() failed: %d", r);
@@ -592,6 +592,16 @@ static void audio_record_task(void *arg) {
         int channels = codec.getInputChannels();  // 2 for HW AEC, 1 otherwise
         ESP_LOGI(TAG, "Codec reinit: %d Hz, %d ch, aec=%d",
                  AEC_SAMPLE_RATE_HZ, channels, (int)aec);
+
+        // If the driver silently downgraded HW AEC (e.g. CUBE32_AUDIO_ADC_ES8311 is active,
+        // which shares I2S with the DAC and cannot provide a hardware reference loopback),
+        // fall back to No-AEC.  Without this guard, afe_aec_process() would receive a
+        // mono buffer it treats as 2-ch interleaved, producing garbage output or a crash.
+        if (mode == MODE_HW_AEC && codec.getAecMode() != cube32::AecMode::HW) {
+            ESP_LOGW(TAG, "HW AEC unavailable with current ADC source; falling back to No-AEC");
+            mode = MODE_NO_AEC;
+            aec = cube32::AecMode::NONE;
+        }
 
         // ---- AEC handle creation ----
         afe_aec_handle_t *hw_aec = nullptr;

@@ -530,7 +530,11 @@ esp_err_t cube32_init(void)
     /* Initialize Audio — Optional (build + module present + active) */
 #ifdef CONFIG_CUBE32_AUDIO_ENABLED
     if (hw->audio_module_present && hw->audio_active) {
+#ifdef CUBE32_AUDIO_ADC_ES8311
+        ESP_LOGI(TAG, "Audio: Initializing ES8311 (DAC+ADC) codec...");
+#else
         ESP_LOGI(TAG, "Audio: Initializing ES8311/ES7210 codec...");
+#endif
         cube32_result_t audio_ret = cube32::AudioCodec::instance().begin();
         if (audio_ret != CUBE32_OK) {
             ESP_LOGE(TAG, "Failed to initialize audio codec: %d", audio_ret);

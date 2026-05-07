@@ -84,6 +84,7 @@ static uint16_t s_customer_char_handle = 0;
 static uint16_t s_command_char_handle = 0;
 static uint16_t s_progress_char_handle = 0;
 static bool s_ota_in_progress = false;
+static TimerHandle_t s_adv_restart_timer = NULL;
 static uint32_t s_ota_total_len = 0;
 static uint32_t s_ota_received_len = 0;
 
@@ -353,6 +354,16 @@ static int ble_gatt_handler(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
+// One-shot timer callback: restart advertising after the BLE stack has fully
+// settled post-disconnect. Calling ble_gap_adv_start() directly inside the
+// GAP disconnect event returns BLE_HS_EBUSY because the controller has not yet
+// completed link teardown. A 300 ms deferral avoids this race.
+static void adv_restart_timer_cb(TimerHandle_t xTimer)
+{
+    (void)xTimer;
+    start_advertising();
+}
+
 // Request faster connection parameters for high-speed OTA transfer
 static void request_fast_connection_params(uint16_t conn_handle)
 {
@@ -363,7 +374,7 @@ static void request_fast_connection_params(uint16_t conn_handle)
     params.itvl_min = 6;    // 7.5ms (6 * 1.25ms) - minimum BLE spec allows
     params.itvl_max = 12;   // 15ms  (12 * 1.25ms)
     params.latency = 0;     // No slave latency - respond to every connection event
-    params.supervision_timeout = 200;  // 2 seconds (200 * 10ms)
+    params.supervision_timeout = 500;  // 5 seconds (500 * 10ms)
     params.min_ce_len = 0;
     params.max_ce_len = 0;
     
@@ -407,7 +418,7 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
         break;
         
     case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "BLE GAP Event: Disconnect, reason=0x%02X", 
+        ESP_LOGI(TAG, "BLE GAP Event: Disconnect, reason=0x%02X",
                  event->disconnect.reason);
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         
@@ -416,15 +427,24 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
             event->disconnect.reason
         );
         
-        // Restart advertising after disconnect
-        start_advertising();
+        // Restart advertising after disconnect. Defer via timer so the BLE
+        // stack finishes teardown before ble_gap_adv_start() is called.
+        if (s_adv_restart_timer) {
+            xTimerStart(s_adv_restart_timer, 0);
+        } else {
+            start_advertising();
+        }
         break;
         
     case BLE_GAP_EVENT_ADV_COMPLETE:
         ESP_LOGI(TAG, "BLE GAP Event: Advertising complete");
-        // Restart advertising if needed
+        // Restart advertising if we are not connected
         if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
-            start_advertising();
+            if (s_adv_restart_timer) {
+                xTimerStart(s_adv_restart_timer, 0);
+            } else {
+                start_advertising();
+            }
         }
         break;
         
@@ -476,6 +496,10 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
 static void ble_on_reset(int reason)
 {
     ESP_LOGW(TAG, "BLE Host reset: reason=%d", reason);
+    // Cancel any pending restart timer; ble_on_sync will restart advertising
+    if (s_adv_restart_timer) {
+        xTimerStop(s_adv_restart_timer, 0);
+    }
 }
 
 static void ble_on_sync(void)
@@ -499,6 +523,11 @@ static void start_advertising(void)
     struct ble_hs_adv_fields fields;
     struct ble_hs_adv_fields rsp_fields;
     int rc;
+
+    // If already advertising, stop first to reset state cleanly
+    if (ble_gap_adv_active()) {
+        ble_gap_adv_stop();
+    }
     
     memset(&fields, 0, sizeof(fields));
     memset(&rsp_fields, 0, sizeof(rsp_fields));
@@ -509,14 +538,12 @@ static void start_advertising(void)
     fields.name_len = strlen(s_full_device_name);
     fields.name_is_complete = 1;
     
-    ESP_LOGI(TAG, "Setting adv fields: name='%s', len=%d", s_full_device_name, fields.name_len);
-    
     rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to set advertising fields: rc=%d", rc);
+        if (s_adv_restart_timer) xTimerStart(s_adv_restart_timer, 0);
         return;
     }
-    ESP_LOGI(TAG, "Advertising fields set successfully");
     
     // Scan response data - include service UUID for apps doing active scans
     static ble_uuid16_t adv_uuid = BLE_UUID16_INIT(BLE_OTA_SERVICE_UUID);
@@ -529,37 +556,25 @@ static void start_advertising(void)
     rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to set scan response: rc=%d", rc);
+        if (s_adv_restart_timer) xTimerStart(s_adv_restart_timer, 0);
         return;
     }
-    ESP_LOGI(TAG, "Scan response fields set successfully");
     
-    // Advertising parameters - use longer intervals for better compatibility
+    // Advertising parameters
     memset(&adv_params, 0, sizeof(adv_params));
-    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;  // Undirected connectable
-    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;  // General discoverable
-    adv_params.itvl_min = 0x30;  // 30ms (was 20ms)
-    adv_params.itvl_max = 0x60;  // 60ms (was 40ms)
-    adv_params.channel_map = 0x07;  // Use all 3 advertising channels (37, 38, 39)
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    adv_params.itvl_min = 0x30; // 30 ms
+    adv_params.itvl_max = 0x60; // 60 ms
+    adv_params.channel_map = 0x07;  // all 3 channels
     
-    // Use public address (0) - the device has a valid MAC
     uint8_t own_addr_type = BLE_OWN_ADDR_PUBLIC;
-    
-    // Print our BLE address for debugging
-    uint8_t addr[6];
-    rc = ble_hs_id_copy_addr(own_addr_type, addr, NULL);
-    if (rc == 0) {
-        ESP_LOGI(TAG, "BLE Address: %02x:%02x:%02x:%02x:%02x:%02x",
-                 addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
-    }
-    
-    ESP_LOGI(TAG, "Starting advertising: conn_mode=%d, disc_mode=%d, itvl=%d-%d, chan_map=0x%02x",
-             adv_params.conn_mode, adv_params.disc_mode,
-             adv_params.itvl_min, adv_params.itvl_max, adv_params.channel_map);
     
     rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER,
                           &adv_params, ble_gap_event_handler, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to start advertising: rc=%d", rc);
+        if (s_adv_restart_timer) xTimerStart(s_adv_restart_timer, 0);
         return;
     }
     
@@ -719,6 +734,16 @@ cube32_result_t BleOta::initGattServer()
         return CUBE32_NOT_INITIALIZED;
     }
     
+    // Create a one-shot timer for deferred advertising restart after disconnect.
+    // The timer fires once after 300 ms and is re-armed on each disconnect event.
+    if (s_adv_restart_timer == NULL) {
+        s_adv_restart_timer = xTimerCreate("ble_adv_restart",
+            pdMS_TO_TICKS(300), pdFALSE, NULL, adv_restart_timer_cb);
+        if (s_adv_restart_timer == NULL) {
+            ESP_LOGW(TAG, "Failed to create adv restart timer — will use direct restart");
+        }
+    }
+
     // Start NimBLE host task
     nimble_port_freertos_init(ble_host_task);
     

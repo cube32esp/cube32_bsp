@@ -614,6 +614,9 @@ static void audio_playback_task(void *arg) {
         ESP_LOGI(TAG, "Playing WAV: %lu Hz, %d ch, %lu bytes",
                  (unsigned long)header.sample_rate, header.num_channels, (unsigned long)header.data_size);
 
+        // Save volume before reinit — codec.begin() resets it to the Kconfig default.
+        int saved_volume = codec.getOutputVolume();
+
         // Reinit codec at the WAV sample rate to guarantee I2S TX clock matches.
         // Simply calling enableOutput(true) would use the Kconfig output_sample_rate
         // (e.g. 24 kHz) while the WAV is 16 kHz, causing ~1.5x playback speed.
@@ -624,6 +627,7 @@ static void audio_playback_task(void *arg) {
             cfg.input_sample_rate  = (int)header.sample_rate;
             codec.begin(cfg);
         }
+        codec.setOutputVolume(saved_volume);
         
         // Allocate audio buffer
         int16_t *audio_buffer = (int16_t*)heap_caps_malloc(AUDIO_BUFFER_SIZE * sizeof(int16_t), MALLOC_CAP_INTERNAL);
@@ -687,6 +691,7 @@ static void audio_playback_task(void *arg) {
         codec.enableOutput(false);
         codec.end();
         codec.begin();
+        codec.setOutputVolume(saved_volume);
         
         ESP_LOGI(TAG, "Playback complete: %lu samples", (unsigned long)samples_played);
         
@@ -722,7 +727,9 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "========================================");
 
     // Initialize CUBE32 board (includes display, touch, audio, SD card, LVGL)
+    ESP_LOGI(TAG, "[DBG] free heap before cube32_init: %lu bytes", (unsigned long)esp_get_free_heap_size());
     esp_err_t ret = cube32_init();
+    ESP_LOGI(TAG, "[DBG] free heap after  cube32_init: %lu bytes", (unsigned long)esp_get_free_heap_size());
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize CUBE32 board: %s", esp_err_to_name(ret));
         return;
@@ -755,7 +762,10 @@ extern "C" void app_main(void)
     // Create UI
     ESP_LOGI(TAG, "Creating UI...");
     if (lvgl_port_lock(1000)) {
+        ESP_LOGI(TAG, "[DBG] LVGL lock acquired OK");
         create_ui();
+        uint32_t child_cnt = lv_obj_get_child_cnt(lv_scr_act());
+        ESP_LOGI(TAG, "[DBG] UI created — screen child count: %lu", (unsigned long)child_cnt);
         lvgl_port_unlock();
     } else {
         ESP_LOGE(TAG, "Failed to acquire LVGL lock");

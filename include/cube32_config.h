@@ -102,6 +102,13 @@ extern "C" {
 #define CUBE32_AUDIO_CODEC_ES8311_ADDR  ES8311_CODEC_DEFAULT_ADDR
 #define CUBE32_AUDIO_CODEC_ES7210_ADDR  ES7210_CODEC_DEFAULT_ADDR
 
+// ADC Microphone Input Source — toggle manually during testing (Kconfig to follow).
+// To use ES8311 ADC: uncomment CUBE32_AUDIO_ADC_ES8311, comment out CUBE32_AUDIO_ADC_ES7210.
+// To use ES7210 ADC (default): uncomment CUBE32_AUDIO_ADC_ES7210, comment out CUBE32_AUDIO_ADC_ES8311.
+// NOTE: HW AEC is NOT available when CUBE32_AUDIO_ADC_ES8311 is selected.
+// #define CUBE32_AUDIO_ADC_ES8311         ///< ES8311 codec ADC path (no HW AEC)
+ #define CUBE32_AUDIO_ADC_ES7210            ///< ES7210 dedicated 4-ch TDM ADC (default, HW AEC supported)
+
 #define CUBE32_AUDIO_IOX_ADDR       0x20
 
 /* Audio IO Expander (TCA9554 @ CUBE32_AUDIO_IOX_ADDR) Port Assignment */
