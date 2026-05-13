@@ -45,6 +45,7 @@ set(PRIV_REQUIRED_COMPONENTS
     esp_event
     esp_netif
     spi_flash
+    esp_psram
     esp_io_expander
     esp_io_expander_tca9554
     esp_modem

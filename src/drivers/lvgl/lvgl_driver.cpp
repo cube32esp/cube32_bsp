@@ -159,11 +159,20 @@ cube32_result_t LvglDisplay::addDisplay(const cube32_lvgl_config_t& config) {
     // Calculate buffer size using base dimensions
     uint32_t buffer_size = config.buffer_size;
     if (buffer_size == 0) {
-        // Auto calculate: use percentage of screen size
+        // Auto calculate: width * CUBE32_LVGL_BUFFER_LINES lines.
         // NOTE: lvgl_port_display_cfg_t::buffer_size is in PIXELS, not bytes.
-        // esp_lvgl_port multiplies by color_bytes internally when allocating.
-        buffer_size = base_width * base_height * CUBE32_LVGL_BUFFER_SIZE_PERCENT / 100;
-        ESP_LOGI(TAG, "Auto-calculated buffer size: %" PRIu32 " pixels", buffer_size);
+        // esp_lvgl_port multiplies by color_bytes (2 for RGB565) internally.
+        //
+        // When USE_SPIRAM=n, buffers are allocated from internal DMA RAM
+        // (buff_dma=1).  Keeping this value small is critical: the SPI master,
+        // USB host, audio DMA, and FreeRTOS task stacks all compete for the
+        // same limited pool.  20 lines = 9,600 bytes for a 240-wide panel.
+        //
+        // When USE_SPIRAM=y, buffers live in PSRAM and a larger line count
+        // may be used without affecting internal RAM.
+        buffer_size = (uint32_t)base_width * CONFIG_CUBE32_LVGL_BUFFER_LINES;
+        ESP_LOGI(TAG, "Auto-calculated buffer size: %" PRIu32 " pixels (%d lines)",
+                 buffer_size, CONFIG_CUBE32_LVGL_BUFFER_LINES);
     }
 
     // Configure display

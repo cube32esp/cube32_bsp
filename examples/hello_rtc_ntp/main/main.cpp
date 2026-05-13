@@ -90,6 +90,7 @@ static lv_obj_t *s_weekday_label = nullptr;
 static lv_obj_t *s_wifi_status_label = nullptr;
 static lv_obj_t *s_ntp_status_label = nullptr;
 static lv_obj_t *s_sync_info_label = nullptr;
+static lv_obj_t *s_conn_mode_label = nullptr;
 
 // Update timer
 static lv_timer_t *s_update_timer = nullptr;
@@ -205,10 +206,10 @@ static esp_err_t wifi_init_sta(void) {
 
 static esp_err_t init_network(void) {
 #ifdef CONFIG_CUBE32_MODEM_ENABLED
-    // Use modem only when the module is physically detected (TCA9554 @ 0x22)
+    // Use modem only when the module is physically detected AND the active flag is set
     const cube32_hw_manifest_t* hw = cube32_hw_manifest();
-    if (hw->modem_module_present) {
-        ESP_LOGI(TAG, "Modem module detected — using LTE for NTP synchronization...");
+    if (hw->modem_module_present && hw->modem_active) {
+        ESP_LOGI(TAG, "Modem module detected and active — using LTE for NTP synchronization...");
 
         cube32::A7670Modem& modem = cube32::A7670Modem::instance();
 
@@ -274,9 +275,12 @@ static esp_err_t init_network(void) {
         s_using_modem = true;
         ESP_LOGI(TAG, "Modem connected! IP: %s", s_wifi_ip);
         return ESP_OK;
+    } else if (hw->modem_module_present && !hw->modem_active) {
+        ESP_LOGW(TAG, "Modem detected but Active flag is off — falling back to WiFi");
+        s_using_modem = false;
+    } else {
+        ESP_LOGW(TAG, "Modem enabled in Kconfig but module not detected — falling back to WiFi");
     }
-
-    ESP_LOGW(TAG, "Modem enabled in Kconfig but module not detected — falling back to WiFi");
 #endif
     ESP_LOGI(TAG, "Using WiFi for internet connection...");
     return wifi_init_sta();
@@ -412,8 +416,8 @@ static void update_ui_timer_cb(lv_timer_t *timer) {
             lv_obj_set_style_text_color(s_wifi_status_label, lv_color_hex(0x00E676), LV_PART_MAIN);
         } else {
             lv_label_set_text(s_wifi_status_label,
-                s_using_modem ? LV_SYMBOL_CALL "  Connecting LTE..." : LV_SYMBOL_WIFI "  Disconnected");
-            lv_obj_set_style_text_color(s_wifi_status_label, lv_color_hex(0xFF5252), LV_PART_MAIN);
+                s_using_modem ? LV_SYMBOL_CALL "  Connecting LTE..." : LV_SYMBOL_WIFI "  Connecting WiFi...");
+            lv_obj_set_style_text_color(s_wifi_status_label, lv_color_hex(0xFFD740), LV_PART_MAIN);
         }
     }
     
@@ -536,7 +540,8 @@ static void create_ui(void) {
     
     // WiFi Status
     s_wifi_status_label = lv_label_create(scr);
-    lv_label_set_text(s_wifi_status_label, LV_SYMBOL_WIFI "  Connecting...");
+    lv_label_set_text(s_wifi_status_label,
+        s_using_modem ? LV_SYMBOL_CALL "  Connecting LTE..." : LV_SYMBOL_WIFI "  Connecting WiFi...");
     lv_obj_set_style_text_color(s_wifi_status_label, lv_color_hex(0xFFD740), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_wifi_status_label, &lv_font_montserrat_14, LV_PART_MAIN);
 #if LV_FONT_MONTSERRAT_32
@@ -574,6 +579,16 @@ static void create_ui(void) {
 #endif
 
     // ========================================================================
+    // Connection Mode Badge (top-right)
+    // ========================================================================
+    s_conn_mode_label = lv_label_create(scr);
+    lv_label_set_text(s_conn_mode_label,
+        s_using_modem ? LV_SYMBOL_CALL " 4G/LTE" : LV_SYMBOL_WIFI " WiFi");
+    lv_obj_set_style_text_color(s_conn_mode_label, lv_color_hex(0x64B5F6), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_conn_mode_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_align(s_conn_mode_label, LV_ALIGN_TOP_RIGHT, -5, 5);
+
+    // ========================================================================
     // Footer
     // ========================================================================
     lv_obj_t *footer = lv_label_create(scr);
@@ -609,7 +624,16 @@ extern "C" void app_main(void) {
         ESP_LOGE(TAG, "Failed to initialize CUBE32: %d", ret);
         return;
     }
-
+    // Pre-determine connection mode so create_ui() can render the correct badge
+#ifdef CONFIG_CUBE32_MODEM_ENABLED
+    {
+        const cube32_hw_manifest_t* hw = cube32_hw_manifest();
+        s_using_modem = (hw->modem_module_present && hw->modem_active);
+        if (hw->modem_module_present && !hw->modem_active) {
+            ESP_LOGI(TAG, "Modem detected but Active flag is off — will use WiFi");
+        }
+    }
+#endif
     // Create the UI (LVGL is already initialized by cube32_init)
 #if CONFIG_CUBE32_LVGL_ENABLED
     cube32::LvglDisplay& lvgl = cube32::LvglDisplay::instance();

@@ -6,8 +6,9 @@ Demonstrates BM8563 RTC initialization, NTP time synchronization, and LVGL displ
 
 - **BM8563 RTC** - Initialize and read/write real-time clock
 - **Automatic Network Selection** - Runtime detection selects the best available connection:
-  - **LTE Modem (A7670)** - Used when `CONFIG_CUBE32_MODEM_ENABLED` is set and the modem module is physically detected at boot
-  - **WiFi** - Used when modem is not enabled or not detected (automatic fallback)
+  - **LTE Modem (A7670)** - Used when `CONFIG_CUBE32_MODEM_ENABLED` is set, the modem module is physically detected at boot, **and** the modem Active flag (NVS `act_modem`) is enabled
+  - **WiFi** - Used as fallback when modem is not enabled, not detected, or the Active flag is set to off
+- **Connection Mode Badge** - Top-right corner of the display shows `📞 4G/LTE` or `📶 WiFi` from boot
 - **NTP Synchronization** - Sync time with `time.cloudflare.com` over the active connection
 - **Automatic RTC Update** - Update RTC with NTP time after synchronization
 - **LVGL Display** - Dark theme UI showing:
@@ -56,7 +57,13 @@ In `idf.py menuconfig`:
 **CUBE32 Board Configuration → Modem Configuration:**
 - ✅ Enable Modem (A7670)
 
-When modem support is enabled and the A7670 module is physically detected at boot (TCA9554 GPIO expander at I2C address 0x22), the demo automatically uses LTE for NTP synchronization. If the module is enabled in Kconfig but not detected, it falls back to WiFi with a warning.
+When modem support is enabled, the A7670 module is physically detected at boot (TCA9554 GPIO expander at I2C address 0x22), **and** the modem Active flag in NVS is `true`, the demo automatically uses LTE for NTP synchronization.
+
+Fallback to WiFi occurs in any of these cases:
+- Modem module not physically present
+- Modem Active flag (`act_modem`) is set to `false` via the BLE OTA configuration tool
+
+The Active flag is configured via the **CUBE32 Mobile App** using the BLE OTA subsystem and stored in NVS — it survives reboots.
 
 ### 2. Select Application
 
@@ -103,21 +110,23 @@ idf.py -p PORT flash monitor
 ## Display Layout
 
 ```
-┌────────────────────────┐
-│   CUBE32 RTC + NTP     │
-│                        │
-│      14:30:25          │  ← Large time
-│                        │
-│    Jan 9, 2024         │  ← Date
-│                        │
-│      Thursday          │  ← Weekday
-│                        │
-├────────────────────────┤
-│ WiFi Connected: IP     │
-│ ✓ NTP Synced           │
-│ Last sync: 14:30:00    │
-└────────────────────────┘
+┌─────────────────────────┐
+│ CUBE32 RTC + NTP 📶WiFi │  ← Connection mode badge (top-right)
+│                         │
+│       14:30:25          │  ← Large time
+│                         │
+│     Jan 9, 2024         │  ← Date
+│                         │
+│       Thursday          │  ← Weekday
+│                         │
+├─────────────────────────┤
+│ 📶 Connected: 192.168.x │  ← WiFi or 📞 LTE: x.x.x.x
+│ ✓ NTP Synced            │
+│ Last sync: 14:30:00     │
+└─────────────────────────┘
 ```
+
+The connection mode badge in the top-right corner (`📞 4G/LTE` or `📶 WiFi`) is determined at boot and does not change at runtime.
 
 ## Troubleshooting
 
@@ -127,7 +136,11 @@ idf.py -p PORT flash monitor
 
 **LTE modem not used despite being enabled:**
 - Confirm the A7670 module is physically installed (modem detection is runtime, not just Kconfig)
-- Check serial log for "Modem module detected" or "module not detected — falling back to WiFi"
+- Check that the modem Active flag is enabled — set it via the **CUBE32 Mobile App** (BLE OTA subsystem) and verify `act_modem = true` in NVS
+- Check serial log for one of:
+  - `"Modem module detected and active — using LTE"` → modem path taken
+  - `"Modem detected but Active flag is off — falling back to WiFi"` → module present but flag is off
+  - `"Modem enabled in Kconfig but module not detected"` → module not physically installed
 
 **NTP won't sync:**
 - Ensure network is connected (check IP address shown on display)

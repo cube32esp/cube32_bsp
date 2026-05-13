@@ -69,6 +69,34 @@ menu "CUBE32 Board Configuration"
             help
                 Allocate LVGL display buffers in SPIRAM instead of internal RAM.
                 Use this if you have limited internal RAM but have PSRAM available.
+                When disabled, buffers are allocated in internal DMA RAM (buff_dma=1),
+                which is required when the SPI display is the transport — PSRAM is not
+                directly DMA-accessible, so the SPI master would otherwise allocate a
+                private DMA bounce-buffer in internal heap for every transfer.
+
+        config CUBE32_LVGL_BUFFER_LINES
+            int "Draw buffer height (lines)"
+            default 20
+            range 1 240
+            depends on CUBE32_LVGL_ENABLED
+            help
+                Number of display scan lines allocated for each LVGL draw buffer.
+                Buffer size in bytes = width * lines * 2  (RGB565, 2 bytes/pixel).
+                For a 240-pixel-wide panel the default of 20 lines uses 9,600 bytes
+                per buffer — matching the xiaozhi SpiLcdDisplay default and keeping
+                internal DMA RAM usage minimal.
+
+                This setting is most important when USE_SPIRAM and DOUBLE_BUFFER are
+                both disabled.  In that configuration each draw buffer is allocated
+                from internal DMA RAM, which is a scarce resource shared with the SPI
+                master, USB host endpoint descriptors, audio DMA, and task stacks.
+                The old formula (width * height * 20 / 100) allocated ~22.5 KB per
+                buffer for a 240×240 panel; 20 lines cuts that to ~9.6 KB, saving
+                ~13 KB of internal DMA RAM and preventing ESP_ERR_NO_MEM failures in
+                concurrent audio + camera + modem workloads.
+
+                When USE_SPIRAM=y the draw buffers live in PSRAM and this value only
+                affects PSRAM consumption — it can be set higher without risk.
 
         config CUBE32_LVGL_TASK_PRIORITY
             int "LVGL Task Priority"
