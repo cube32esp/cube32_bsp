@@ -103,23 +103,37 @@ struct FaceExpression {
 // ============================================================================
 
 /**
- * @brief Face display geometry configuration  
- * 
- * All values in pixels, designed for 240x240 screen.
+ * @brief Face display geometry configuration
+ *
+ * face_x / face_y / face_w / face_h define the sub-region of the parent
+ * object that the face occupies.  Leave face_w / face_h at 0 to fall back
+ * to screen_w / screen_h (legacy full-screen behaviour).
+ *
+ * Setting a bounded face area is strongly recommended when sibling LVGL
+ * objects (e.g. status bars) share the same screen: the 33ms animation
+ * timer fires lv_obj_set_pos/size on eye objects every tick, emitting
+ * LV_EVENT_CHILD_CHANGED up the tree.  Wrapping the face in its own clip
+ * container stops that event before it reaches the screen and disrupts
+ * SCROLL_CIRCULAR animations on labels in sibling objects.
  */
 struct FaceConfig {
-    uint16_t screen_w;      ///< Screen width
-    uint16_t screen_h;      ///< Screen height
-    uint16_t eye_radius;    ///< Eyeball radius
-    uint16_t pupil_radius;  ///< Default pupil radius
-    uint16_t highlight_r;   ///< Highlight dot radius
-    uint16_t eye_spacing;   ///< Distance between eye centers
-    int16_t  eye_y;         ///< Vertical center of eyes from screen center
-    uint32_t bg_color;      ///< Background color
-    uint32_t eye_color;     ///< Eyeball color (white)
-    uint32_t pupil_color;   ///< Pupil color (dark)
+    uint16_t screen_w;        ///< Full screen width  (fallback when face_w==0)
+    uint16_t screen_h;        ///< Full screen height (fallback when face_h==0)
+    uint16_t eye_radius;      ///< Eyeball radius
+    uint16_t pupil_radius;    ///< Default pupil radius
+    uint16_t highlight_r;     ///< Highlight dot radius
+    uint16_t eye_spacing;     ///< Distance between eye centers
+    int16_t  eye_y;           ///< Vertical center of eyes from face-area center
+    uint32_t bg_color;        ///< Background color
+    uint32_t eye_color;       ///< Eyeball color (white)
+    uint32_t pupil_color;     ///< Pupil color (dark)
     uint32_t highlight_color; ///< Highlight sparkle color
-    uint32_t lid_color;     ///< Eyelid color (same as background)
+    uint32_t lid_color;       ///< Eyelid color (same as background)
+    // Optional face sub-region — leave face_w/face_h at 0 for full screen
+    int16_t  face_x;          ///< X offset of face area within parent (default 0)
+    int16_t  face_y;          ///< Y offset of face area within parent (default 0)
+    uint16_t face_w;          ///< Width  of face area (0 = use screen_w)
+    uint16_t face_h;          ///< Height of face area (0 = use screen_h)
 };
 
 /**
@@ -138,6 +152,10 @@ struct FaceConfig {
     .pupil_color    = 0x1A1A2E, \
     .highlight_color= 0xFFFFFF, \
     .lid_color      = 0x121212, \
+    .face_x         = 0, \
+    .face_y         = 0, \
+    .face_w         = 0, \
+    .face_h         = 0, \
 }
 
 // ============================================================================

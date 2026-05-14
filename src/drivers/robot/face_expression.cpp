@@ -239,6 +239,9 @@ cube32_result_t FaceDisplay::begin(lv_obj_t* parent) {
         config.screen_w = lvgl.getWidth();
         config.screen_h = lvgl.getHeight();
     }
+    // When no face sub-area is specified default to full screen
+    if (config.face_w == 0) config.face_w = config.screen_w;
+    if (config.face_h == 0) config.face_h = config.screen_h;
 
     return begin(config, parent);
 }
@@ -339,19 +342,32 @@ void FaceDisplay::createFaceObjects(lv_obj_t* parent) {
         parent = lv_screen_active();
     }
 
-    // Face container — full screen, dark background
+    // Resolve effective face area dimensions
+    uint16_t fw = m_config.face_w ? m_config.face_w : m_config.screen_w;
+    uint16_t fh = m_config.face_h ? m_config.face_h : m_config.screen_h;
+
+    // Face container — opaque dark background, sized to the face sub-area.
+    // Positioned directly in the parent (usually the screen) at (face_x, face_y).
+    // Using lv_obj_set_pos (NOT lv_obj_align) so LV_STYLE_ALIGN is never
+    // stored on this object.  lv_obj_align would set LV_STYLE_ALIGN which
+    // causes lv_obj_mark_layout_as_dirty to send LV_EVENT_CHILD_CHANGED to
+    // the screen every time an eye moves, propagating layout-dirty state
+    // through unrelated siblings (bars).  lv_obj_set_pos sets LV_STYLE_X/Y
+    // which still marks scr->scr_layout_inv=1, but the bar objects keep
+    // layout_inv=0 so lv_layout_apply never touches them.
     m_face_container = lv_obj_create(parent);
-    lv_obj_set_size(m_face_container, m_config.screen_w, m_config.screen_h);
+    lv_obj_set_size(m_face_container, fw, fh);
     lv_obj_set_style_bg_color(m_face_container, lv_color_hex(m_config.bg_color), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(m_face_container, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(m_face_container, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(m_face_container, 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(m_face_container, 0, LV_PART_MAIN);
     lv_obj_clear_flag(m_face_container, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_align(m_face_container, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_pos(m_face_container, m_config.face_x, m_config.face_y);
 
-    // Calculate eye centers
-    int16_t cx = m_config.screen_w / 2;
-    int16_t cy = m_config.screen_h / 2 + m_config.eye_y;
+    // Calculate eye centers relative to the face area
+    int16_t cx = fw / 2;
+    int16_t cy = fh / 2 + m_config.eye_y;
     int16_t left_cx = cx - m_config.eye_spacing / 2;
     int16_t right_cx = cx + m_config.eye_spacing / 2;
     uint16_t er = m_config.eye_radius;
@@ -394,7 +410,7 @@ void FaceDisplay::createFaceObjects(lv_obj_t* parent) {
 
 void FaceDisplay::destroyFaceObjects() {
     if (m_face_container) {
-        lv_obj_delete(m_face_container);
+        lv_obj_delete(m_face_container);  // cascades: deletes all eye children
         m_face_container = nullptr;
     }
     m_left_eye = {};
@@ -565,8 +581,10 @@ FaceKeyframe FaceDisplay::lerpKeyframes(const FaceKeyframe& a, const FaceKeyfram
 void FaceDisplay::applyState(const FaceKeyframe& state) {
     if (!m_face_container) return;
 
-    int16_t cx = m_config.screen_w / 2;
-    int16_t cy = m_config.screen_h / 2 + m_config.eye_y + (int16_t)state.eye_y_offset;
+    uint16_t fw = m_config.face_w ? m_config.face_w : m_config.screen_w;
+    uint16_t fh = m_config.face_h ? m_config.face_h : m_config.screen_h;
+    int16_t cx = fw / 2;
+    int16_t cy = fh / 2 + m_config.eye_y + (int16_t)state.eye_y_offset;
     int16_t left_cx  = cx - m_config.eye_spacing / 2;
     int16_t right_cx = cx + m_config.eye_spacing / 2;
     uint16_t er = m_config.eye_radius;
