@@ -9,9 +9,10 @@
  *
  * Key design rules:
  *   - Every setting has a compiled default that is used when NVS is empty.
- *   - When the display-model Kconfig changes, model-dependent defaults
- *     (e.g. rotation) are silently reset so the user doesn't get a stale
- *     rotation from a previous display model.
+ *   - When the auto-detected display model (from the touch controller's I2C
+ *     address) changes, model-dependent defaults (e.g. rotation) are
+ *     silently reset so the user doesn't get a stale rotation from a
+ *     previous display model.
  *   - Component active/inactive flags are stored here and also mirrored
  *     into the hardware manifest for convenience.
  *
@@ -36,7 +37,7 @@ extern "C" {
 #define CUBE32_CFG_NVS_NAMESPACE    "cube32_cfg"
 
 /* --- Display --------------------------------------------------------------- */
-#define CUBE32_CFG_KEY_DISP_MODEL       "d_model"       ///< uint8  — last compiled display model id
+#define CUBE32_CFG_KEY_DISP_MODEL       "d_model"       ///< uint8  — last detected display model id
 #define CUBE32_CFG_KEY_DISP_ROTATION    "d_rotation"    ///< uint16 — display rotation (0/90/180/270)
 #define CUBE32_CFG_KEY_DISP_PRISM       "d_prism"       ///< uint8  — prism/mirror mode (0/1)
 
@@ -84,7 +85,7 @@ extern "C" {
 
 typedef struct {
     /* Display */
-    uint8_t     display_model_id;       ///< Tracks Kconfig model for change detection
+    uint8_t     display_model_id;       ///< Tracks auto-detected model (touch I2C addr) for change detection
     uint16_t    display_rotation;       ///< 0, 90, 180, 270
     bool        display_prism;          ///< Horizontal mirror / prism mode
 
@@ -154,17 +155,19 @@ typedef struct {
 /**
  * @brief Get the default display rotation for a given display model.
  *
- * When the compiled display model differs from the model stored in NVS,
+ * When the detected display model differs from the model stored in NVS,
  * the rotation is reset to this default.
  */
 uint16_t cube32_cfg_default_rotation(uint8_t display_model_id);
 
 /**
- * @brief Get a unique model ID for the currently compiled display model.
+ * @brief Get the display model ID auto-detected from the touch controller's
+ *        I2C address (see CUBE32_DISPLAY_MODEL_TABLE in cube32_config.h).
  *
- * Uses Kconfig choices to return a stable integer.
+ * Returns CUBE32_DISPLAY_MODEL_UNKNOWN_ID (0) if no known touch address
+ * was found on the I2C bus.
  */
-uint8_t cube32_cfg_compiled_display_model_id(void);
+uint8_t cube32_cfg_detected_display_model_id(void);
 
 /* ============================================================================
  * Public API
@@ -203,7 +206,8 @@ cube32_result_t cube32_cfg_load(void);
 cube32_result_t cube32_cfg_save(void);
 
 /**
- * @brief Reset all configuration to compiled defaults and persist.
+ * @brief Reset configuration to compiled defaults and persist, preserving the
+ *        current BLE advertised device name.
  */
 cube32_result_t cube32_cfg_reset(void);
 

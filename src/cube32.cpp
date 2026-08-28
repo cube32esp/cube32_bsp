@@ -313,22 +313,59 @@ esp_err_t cube32_init(void)
     }
 #endif  // CONFIG_CUBE32_BLE_OTA_ENABLED
 
-    /* Initialize Display if enabled — Core Peripheral */
+    /* Initialize Display if enabled — Core Peripheral (skip if no known
+     * display model was auto-detected from the touch I2C address) */
 #ifdef CONFIG_CUBE32_DISPLAY_ENABLED
-    ESP_LOGI(TAG, "Display: Initializing ST7789...");
-    cube32_result_t disp_ret = cube32::ST7789Display::instance().begin();
+    if (hw->display_model_id == CUBE32_DISPLAY_MODEL_UNKNOWN_ID) {
+        ESP_LOGW(TAG, "Display: No known display model detected (touch I2C addr 0x%02X) — skipping",
+                 hw->touch_i2c_addr);
+        CUBE32_INIT_SET(CUBE32_DRV_DISPLAY, CUBE32_INIT_SKIPPED);
+        CUBE32_INIT_SET(CUBE32_DRV_LVGL, CUBE32_INIT_SKIPPED);
+    } else {
+    bool use_st7796 = (hw->display_ic == CUBE32_DISPLAY_IC_ST7796);
+    // TEMP bring-up bypass (ST7796S only): ignore NVS-stored rotation/prism
+    // until the base orientation + color issues are fully resolved, to keep
+    // the test matrix simple per user request. ST7789 boards are unaffected
+    // and keep using their normal NVS-driven values. Remove once ST7796S
+    // bring-up is stable and rotation/prism should resume being persisted.
+    uint16_t effective_rotation = use_st7796 ? 0 : cfg->display_rotation;
+    bool effective_prism = use_st7796 ? false : cfg->display_prism;
+    ESP_LOGI(TAG, "Display: Initializing %s (%s, %ux%u)...",
+             use_st7796 ? "ST7796S" : "ST7789",
+             hw->display_model_name, hw->display_h_res, hw->display_v_res);
+    cube32_result_t disp_ret;
+    uint16_t disp_width = 0, disp_height = 0;
+    if (use_st7796) {
+        cube32_st7796_config_t st7796_config = CUBE32_ST7796_CONFIG_DEFAULT();
+        st7796_config.h_res = hw->display_h_res;
+        st7796_config.v_res = hw->display_v_res;
+        disp_ret = cube32::ST7796Display::instance().begin(st7796_config);
+        disp_width = cube32::ST7796Display::instance().getWidth();
+        disp_height = cube32::ST7796Display::instance().getHeight();
+    } else {
+        cube32_st7789_config_t st7789_config = CUBE32_ST7789_CONFIG_DEFAULT();
+        st7789_config.h_res = hw->display_h_res;
+        st7789_config.v_res = hw->display_v_res;
+        disp_ret = cube32::ST7789Display::instance().begin(st7789_config);
+        disp_width = cube32::ST7789Display::instance().getWidth();
+        disp_height = cube32::ST7789Display::instance().getHeight();
+    }
     if (disp_ret != CUBE32_OK) {
         ESP_LOGE(TAG, "Failed to initialize display: %d", disp_ret);
         CUBE32_INIT_SET(CUBE32_DRV_DISPLAY, CUBE32_INIT_FAIL);
     } else {
         hw->display_present = true;
-        ESP_LOGI(TAG, "Display: Initialized successfully (%dx%d)",
-                 cube32::ST7789Display::instance().getWidth(),
-                 cube32::ST7789Display::instance().getHeight());
+        ESP_LOGI(TAG, "Display: Initialized successfully (%dx%d)", disp_width, disp_height);
         CUBE32_INIT_SET(CUBE32_DRV_DISPLAY, CUBE32_INIT_OK);
 
+        /*
+         * hello_display draws directly through ST7789Display/ST7796Display.
+         * Do not start esp_lvgl_port for that raw display test: it owns the
+         * panel-I/O completion callback and would replace the callback used
+         * by direct ST7796 drawing to protect DMA-backed strip buffers.
+         */
+    #if defined(CONFIG_CUBE32_LVGL_ENABLED) && !defined(CONFIG_CUBE32_APP_HELLO_DISPLAY)
         /* Initialize LVGL if enabled */
-#ifdef CONFIG_CUBE32_LVGL_ENABLED
         ESP_LOGI(TAG, "LVGL: Initializing...");
         cube32_lvgl_config_t lvgl_config = CUBE32_LVGL_CONFIG_DEFAULT();
 #ifdef CONFIG_CUBE32_LVGL_DOUBLE_BUFFER
@@ -362,16 +399,20 @@ esp_err_t cube32_init(void)
             CUBE32_INIT_SET(CUBE32_DRV_LVGL, CUBE32_INIT_OK);
 
             // Apply display rotation from NVS config
-            if (cfg->display_rotation != 0) {
-                cube32::LvglDisplay::instance().setRotation(cfg->display_rotation);
-                ESP_LOGI(TAG, "Display: Rotation set to %u° (from config)", cfg->display_rotation);
+            if (effective_rotation != 0) {
+                cube32::LvglDisplay::instance().setRotation(effective_rotation);
+                ESP_LOGI(TAG, "Display: Rotation set to %u° (from config)", effective_rotation);
             }
         }
 
         // Apply prism mode from NVS config (must be done after LVGL sets rotation)
-        if (cfg->display_prism) {
+        if (effective_prism) {
             uint16_t current_rotation = cube32::LvglDisplay::instance().getRotation();
-            cube32::ST7789Display::instance().setPrismMode(true, current_rotation);
+            if (use_st7796) {
+                cube32::ST7796Display::instance().setPrismMode(true, current_rotation);
+            } else {
+                cube32::ST7789Display::instance().setPrismMode(true, current_rotation);
+            }
             ESP_LOGI(TAG, "Display: Prism mode enabled (from config)");
         }
 
@@ -393,22 +434,36 @@ esp_err_t cube32_init(void)
         }
 #endif
 #else
-        ESP_LOGI(TAG, "LVGL: Disabled");
+#if defined(CONFIG_CUBE32_APP_HELLO_DISPLAY)
+    ESP_LOGI(TAG, "LVGL: Skipped for raw hello_display test");
+#else
+    ESP_LOGI(TAG, "LVGL: Disabled");
+#endif
         CUBE32_INIT_SET(CUBE32_DRV_LVGL, CUBE32_INIT_NOT_PRESENT);
 
         // Apply display rotation from NVS config (non-LVGL path)
-        if (cfg->display_rotation != 0) {
-            cube32::ST7789Display::instance().setRotation(cfg->display_rotation);
-            ESP_LOGI(TAG, "Display: Rotation set to %u° (from config)", cfg->display_rotation);
+        if (effective_rotation != 0) {
+            if (use_st7796) {
+                cube32::ST7796Display::instance().setRotation(effective_rotation);
+            } else {
+                cube32::ST7789Display::instance().setRotation(effective_rotation);
+            }
+            ESP_LOGI(TAG, "Display: Rotation set to %u° (from config)", effective_rotation);
         }
 
         // Apply prism mode from NVS config for non-LVGL use
-        if (cfg->display_prism) {
-            uint16_t current_rotation = cube32::ST7789Display::instance().getRotation();
-            cube32::ST7789Display::instance().setPrismMode(true, current_rotation);
+        if (effective_prism) {
+            uint16_t current_rotation = use_st7796 ? cube32::ST7796Display::instance().getRotation()
+                                                    : cube32::ST7789Display::instance().getRotation();
+            if (use_st7796) {
+                cube32::ST7796Display::instance().setPrismMode(true, current_rotation);
+            } else {
+                cube32::ST7789Display::instance().setPrismMode(true, current_rotation);
+            }
             ESP_LOGI(TAG, "Display: Prism mode enabled (from config)");
         }
 #endif
+    }
     }
 #else
     ESP_LOGI(TAG, "Display: Disabled");
@@ -420,7 +475,12 @@ esp_err_t cube32_init(void)
 #ifdef CONFIG_CUBE32_TOUCH_ENABLED
     if (hw->touch_present) {
     ESP_LOGI(TAG, "Touch: Initializing (IC=0x%02X)...", hw->touch_i2c_addr);
-    cube32_result_t touch_ret = cube32::Touch::instance().begin();
+    cube32_touch_config_t touch_config = CUBE32_TOUCH_CONFIG_DEFAULT();
+    touch_config.h_res = hw->display_h_res;
+    touch_config.v_res = hw->display_v_res;
+    touch_config.ic_type = (cube32_touch_ic_t)hw->touch_ic;
+    touch_config.i2c_addr = hw->touch_i2c_addr;  // GT911 address is runtime-detected (0x5D or 0x14)
+    cube32_result_t touch_ret = cube32::Touch::instance().begin(touch_config);
     if (touch_ret != CUBE32_OK) {
         ESP_LOGE(TAG, "Failed to initialize touch: %d", touch_ret);
         CUBE32_INIT_SET(CUBE32_DRV_TOUCH, CUBE32_INIT_FAIL);
@@ -429,6 +489,7 @@ esp_err_t cube32_init(void)
         switch (cube32::Touch::instance().getICType()) {
             case CUBE32_TOUCH_IC_CST816: ic_name = "CST816S"; break;
             case CUBE32_TOUCH_IC_FT6336: ic_name = "FT6336"; break;
+            case CUBE32_TOUCH_IC_GT911:  ic_name = "GT911"; break;
             default: break;
         }
         ESP_LOGI(TAG, "Touch: Initialized successfully (%s, %dx%d)",
@@ -530,12 +591,67 @@ esp_err_t cube32_init(void)
     /* Initialize Audio — Optional (build + module present + active) */
 #ifdef CONFIG_CUBE32_AUDIO_ENABLED
     if (hw->audio_module_present && hw->audio_active) {
-#ifdef CUBE32_AUDIO_ADC_ES8311
-        ESP_LOGI(TAG, "Audio: Initializing ES8311 (DAC+ADC) codec...");
-#else
-        ESP_LOGI(TAG, "Audio: Initializing ES8311/ES7210 codec...");
-#endif
-        cube32_result_t audio_ret = cube32::AudioCodec::instance().begin();
+        const char* adc_src_str = (hw->audio_es8311_addr == CUBE32_I2C_ADDR_ES8311_INTEGRATED)
+                                  ? "ES8311 ADC (integrated)" : "ES7210 ADC (dedicated)";
+        ESP_LOGI(TAG, "Audio: Initializing ES8311@0x%02X + %s...", hw->audio_es8311_addr, adc_src_str);
+
+        /* Build runtime config: set ES8311 address and ADC source from hw manifest.
+         * esp_codec_dev uses 8-bit write-address format (7-bit addr << 1), so convert
+         * the 7-bit hw_manifest address: 0x18 → 0x30 (dedicated), 0x19 → 0x32 (integrated).
+         */
+        cube32::AudioCodecConfig audio_cfg = CUBE32_AUDIO_CONFIG_DEFAULT();
+        audio_cfg.es8311_addr = (uint8_t)(hw->audio_es8311_addr << 1);
+        audio_cfg.adc_source  = (hw->audio_es8311_addr == CUBE32_I2C_ADDR_ES8311_INTEGRATED)
+                                 ? cube32::AdcSource::ES8311
+                                 : cube32::AdcSource::ES7210;
+
+        /* Integrated module: PA (NS4150B) is on GPIO7 directly — no TCA9554 IOX. */
+        if (hw->audio_es8311_addr == CUBE32_I2C_ADDR_ES8311_INTEGRATED) {
+            audio_cfg.pa_pin = (gpio_num_t)CUBE32_AUDIO_INTEGRATED_PA_PIN;
+        }
+
+        /* Combined scenario: ES8311@0x19 (Integrated Core+Audio module) is physically
+         * present on the shared I2S bus but the Dedicated Audio Module wins for audio.
+         * In its uninitialized power-on state, ES8311@0x19's internal PLL can lock onto
+         * the active I2S clocks and its ADCDAT output (GPIO10 = I2S DIN) may not be
+         * tri-stated, conflicting with ES7210's TDM output on the same pin.  This
+         * corrupts the I2S RX DMA stream so codec.read() returns zeros (silence) and
+         * the loopback / AEC pipeline produces no audio.
+         *
+         * Fix: apply the managed driver's full ES8311 suspend sequence via I2C before
+         * the audio subsystem starts. It powers down the unused ADC and keeps ADCDAT
+         * high-Z for the session because no configuration is sent to 0x19 afterwards.
+         */
+        if (hw->core_module == CUBE32_CORE_MODULE_S3_AUDIO &&
+            hw->audio_es8311_addr == CUBE32_I2C_ADDR_ES8311) {
+            ESP_LOGI(TAG, "Audio: Combined modules — suspending ES8311@0x19 to "
+                          "keep its ADCDAT pin high-Z while ES7210 is active");
+            i2c_master_bus_handle_t bus = cube32::I2CBus::instance().getHandle();
+            i2c_device_config_t dev_cfg = {};
+            dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+            dev_cfg.device_address  = CUBE32_I2C_ADDR_ES8311_INTEGRATED; // 0x19
+            dev_cfg.scl_speed_hz    = CUBE32_I2C_FREQ_HZ;
+            i2c_master_dev_handle_t es8311_19 = nullptr;
+            if (i2c_master_bus_add_device(bus, &dev_cfg, &es8311_19) == ESP_OK) {
+                /* Matches esp_codec_dev's es8311_suspend() sequence. Reset-only
+                 * is not enough: releasing reset permits the unused ADC output
+                 * to drive GPIO10 again as soon as the I2S clocks are running. */
+                static constexpr uint8_t suspend_seq[][2] = {
+                    {0x32, 0x00}, {0x17, 0x00}, {0x0E, 0xFF},
+                    {0x12, 0x02}, {0x14, 0x00}, {0x0D, 0xFA},
+                    {0x15, 0x00}, {0x02, 0x10}, {0x00, 0x00},
+                    {0x00, 0x1F}, {0x01, 0x30}, {0x01, 0x00},
+                    {0x45, 0x00}, {0x0D, 0xFC}, {0x02, 0x00},
+                };
+                for (const auto &reg : suspend_seq) {
+                    i2c_master_transmit(es8311_19, reg, sizeof(reg), 20);
+                }
+                vTaskDelay(pdMS_TO_TICKS(5));
+                i2c_master_bus_rm_device(es8311_19);
+            }
+        }
+
+        cube32_result_t audio_ret = cube32::AudioCodec::instance().begin(audio_cfg);
         if (audio_ret != CUBE32_OK) {
             ESP_LOGE(TAG, "Failed to initialize audio codec: %d", audio_ret);
             CUBE32_INIT_SET(CUBE32_DRV_AUDIO, CUBE32_INIT_FAIL);

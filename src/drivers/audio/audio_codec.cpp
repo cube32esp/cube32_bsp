@@ -12,6 +12,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <cstring>
+#include "utils/hw_manifest.h"
 
 static const char* TAG = "cube32_audio";
 
@@ -39,6 +40,12 @@ AudioCodec::~AudioCodec() {
 // ============================================================================
 
 cube32_result_t AudioCodec::begin() {
+    // After the first begin(config) call (e.g. from cube32_init()), m_config holds the
+    // hw-detected settings (correct ES8311 I2C address, ADC source, PA pin).  Reuse it
+    // so that end()/begin() cycles in examples preserve those runtime-detected values.
+    if (m_config_valid) {
+        return begin(m_config);
+    }
     AudioCodecConfig config = CUBE32_AUDIO_CONFIG_DEFAULT();
     return begin(config);
 }
@@ -51,6 +58,7 @@ cube32_result_t AudioCodec::begin(const AudioCodecConfig& config) {
 
     // Store configuration
     m_config = config;
+    m_config_valid = true;
     m_aec_mode = config.aec_mode;
     m_output_volume = config.output_volume;
     m_input_gain = config.input_gain;
@@ -81,6 +89,44 @@ cube32_result_t AudioCodec::begin(const AudioCodecConfig& config) {
     if (!I2CBus::instance().isInitialized()) {
         ESP_LOGE(TAG, "I2C bus not initialized");
         return CUBE32_NOT_INITIALIZED;
+    }
+
+    /* Combined-scenario guard: when the Integrated Core+Audio Module (ES8311@0x19) is
+     * physically present on the same I2S bus as ES7210, ES8311@0x19's ADCDAT output
+     * (GPIO10 / I2S DIN) may not be tri-stated once I2S clocks start — corrupting the
+    * ES7210 TDM stream. Put 0x19 into the managed driver's complete suspend
+    * state on EVERY begin() call (not just the first), so end()+begin()
+    * cycles in examples are also covered.
+     */
+    if (m_config.adc_source == AdcSource::ES7210) {
+        const cube32_hw_manifest_t* mf = cube32_hw_manifest();
+        if (mf && mf->scanned && mf->core_module == CUBE32_CORE_MODULE_S3_AUDIO) {
+            ESP_LOGI(TAG, "  [DBG] Combined modules: suspending ES8311@0x19 "
+                          "(ADCDAT high-Z guard before I2S start)");
+            i2c_master_bus_handle_t bus = I2CBus::instance().getHandle();
+            i2c_device_config_t dev_cfg = {};
+            dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+            dev_cfg.device_address  = CUBE32_I2C_ADDR_ES8311_INTEGRATED;  // 0x19
+            dev_cfg.scl_speed_hz    = CUBE32_I2C_FREQ_HZ;
+            i2c_master_dev_handle_t dev_19 = nullptr;
+            if (i2c_master_bus_add_device(bus, &dev_cfg, &dev_19) == ESP_OK) {
+                // This is the proven es8311_suspend() register sequence from
+                // esp_codec_dev. A reset pulse alone is insufficient: release
+                // from reset may let the unused ADC resume driving ADCDAT.
+                static constexpr uint8_t suspend_seq[][2] = {
+                    {0x32, 0x00}, {0x17, 0x00}, {0x0E, 0xFF},
+                    {0x12, 0x02}, {0x14, 0x00}, {0x0D, 0xFA},
+                    {0x15, 0x00}, {0x02, 0x10}, {0x00, 0x00},
+                    {0x00, 0x1F}, {0x01, 0x30}, {0x01, 0x00},
+                    {0x45, 0x00}, {0x0D, 0xFC}, {0x02, 0x00},
+                };
+                for (const auto &reg : suspend_seq) {
+                    i2c_master_transmit(dev_19, reg, sizeof(reg), 20);
+                }
+                vTaskDelay(pdMS_TO_TICKS(5));
+                i2c_master_bus_rm_device(dev_19);
+            }
+        }
     }
 
     ESP_LOGI(TAG, "Initializing audio codec...");
@@ -144,11 +190,18 @@ cube32_result_t AudioCodec::begin(const AudioCodecConfig& config) {
         }
     }
 
-    // Initialize PA control via IO expander
-    ret = initPAControl();
-    if (ret != CUBE32_OK) {
-        ESP_LOGW(TAG, "PA control initialization failed - speaker may not work");
-        // Continue anyway, as audio input may still work
+    // Initialize PA control.
+    // If pa_pin is set, the ES8311 driver manages the PA GPIO directly — TCA9554 is not needed
+    // (integrated CUBE32 Core+Audio module: NS4150B PA on GPIO7, no IOX fitted).
+    // If pa_pin is NC, use TCA9554 IO expander (dedicated Audio Module: PA via IOX@0x20).
+    if (m_config.pa_pin != GPIO_NUM_NC) {
+        ESP_LOGI(TAG, "PA control: GPIO%d (direct, via ES8311 driver)", (int)m_config.pa_pin);
+    } else {
+        ret = initPAControl();
+        if (ret != CUBE32_OK) {
+            ESP_LOGW(TAG, "PA control initialization failed - speaker may not work");
+            // Continue anyway, as audio input may still work
+        }
     }
 
     m_initialized = true;
@@ -304,51 +357,51 @@ cube32_result_t AudioCodec::createDuplexChannels() {
     }
     ESP_LOGI(TAG, "  [DBG] I2S TX (STD stereo) channel init OK");
 
-#ifdef CUBE32_AUDIO_ADC_ES8311
-    // Configure RX channel (input) - Standard I2S mode for ES8311 ADC.
-    // ES8311 has a single mic so RX is mono.  Note: esp_codec_dev_open()
-    // reconfigures the I2S slot/clock at runtime based on the codec's sample
-    // info, so the values set here are only the initial state.
-    i2s_std_config_t rx_std_cfg = {
-        .clk_cfg = {
-            .sample_rate_hz = (uint32_t)m_config.input_sample_rate,
-            .clk_src = I2S_CLK_SRC_DEFAULT,
-            .ext_clk_freq_hz = 0,
-            .mclk_multiple = I2S_MCLK_MULTIPLE_256
-        },
-        .slot_cfg = {
-            .data_bit_width = I2S_DATA_BIT_WIDTH_16BIT,
-            .slot_bit_width = I2S_SLOT_BIT_WIDTH_AUTO,
-            .slot_mode = I2S_SLOT_MODE_MONO,
-            .slot_mask = I2S_STD_SLOT_LEFT,
-            .ws_width = I2S_DATA_BIT_WIDTH_16BIT,
-            .ws_pol = false,
-            .bit_shift = true,
-            .left_align = true,
-            .big_endian = false,
-            .bit_order_lsb = false
-        },
-        .gpio_cfg = {
-            .mclk = m_config.mclk_pin,  // Keep MCLK routed (same as TDM path)
-            .bclk = m_config.bclk_pin,
-            .ws = m_config.lrck_pin,
-            .dout = I2S_GPIO_UNUSED,
-            .din = m_config.din_pin,
-            .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv = false
+    if (m_config.adc_source == AdcSource::ES8311) {
+        // Configure RX channel (input) - Standard I2S mode for ES8311 ADC.
+        // ES8311 has a single mic so RX is mono.  Note: esp_codec_dev_open()
+        // reconfigures the I2S slot/clock at runtime based on the codec's sample
+        // info, so the values set here are only the initial state.
+        i2s_std_config_t rx_std_cfg = {
+            .clk_cfg = {
+                .sample_rate_hz = (uint32_t)m_config.input_sample_rate,
+                .clk_src = I2S_CLK_SRC_DEFAULT,
+                .ext_clk_freq_hz = 0,
+                .mclk_multiple = I2S_MCLK_MULTIPLE_256
+            },
+            .slot_cfg = {
+                .data_bit_width = I2S_DATA_BIT_WIDTH_16BIT,
+                .slot_bit_width = I2S_SLOT_BIT_WIDTH_AUTO,
+                .slot_mode = I2S_SLOT_MODE_MONO,
+                .slot_mask = I2S_STD_SLOT_LEFT,
+                .ws_width = I2S_DATA_BIT_WIDTH_16BIT,
+                .ws_pol = false,
+                .bit_shift = true,
+                .left_align = true,
+                .big_endian = false,
+                .bit_order_lsb = false
+            },
+            .gpio_cfg = {
+                .mclk = m_config.mclk_pin,  // Keep MCLK routed (same as TDM path)
+                .bclk = m_config.bclk_pin,
+                .ws = m_config.lrck_pin,
+                .dout = I2S_GPIO_UNUSED,
+                .din = m_config.din_pin,
+                .invert_flags = {
+                    .mclk_inv = false,
+                    .bclk_inv = false,
+                    .ws_inv = false
+                }
             }
-        }
-    };
+        };
 
-    err = i2s_channel_init_std_mode(m_rx_handle, &rx_std_cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to init RX channel (ES8311 std mode): %s", esp_err_to_name(err));
-        return CUBE32_IO_ERROR;
-    }
-    ESP_LOGI(TAG, "  [DBG] I2S RX (STD mono) channel init OK");
-#else
+        err = i2s_channel_init_std_mode(m_rx_handle, &rx_std_cfg);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to init RX channel (ES8311 std mode): %s", esp_err_to_name(err));
+            return CUBE32_IO_ERROR;
+        }
+        ESP_LOGI(TAG, "  [DBG] I2S RX (STD mono) channel init OK");
+    } else {
     // Configure RX channel (input) - TDM mode for ES7210 (4 channels)
     i2s_tdm_config_t tdm_cfg = {
         .clk_cfg = {
@@ -356,6 +409,8 @@ cube32_result_t AudioCodec::createDuplexChannels() {
             .clk_src = I2S_CLK_SRC_DEFAULT,
             .ext_clk_freq_hz = 0,
             .mclk_multiple = I2S_MCLK_MULTIPLE_256,
+            // Keep ESP-IDF's TDM default. audio_codec_new_i2s_data() uses
+            // the same divider when it reconfigures this channel at open().
             .bclk_div = 8,
         },
         .slot_cfg = {
@@ -392,7 +447,7 @@ cube32_result_t AudioCodec::createDuplexChannels() {
         return CUBE32_IO_ERROR;
     }
     ESP_LOGI(TAG, "  [DBG] I2S RX (TDM 4-ch) channel init OK");
-#endif
+    }   // end if (adc_source == ES8311) ... else
 
     ESP_LOGI(TAG, "I2S duplex channels created");
     return CUBE32_OK;
@@ -418,7 +473,7 @@ cube32_result_t AudioCodec::initOutputCodec() {
     }
 
     // Create ES8311 codec interface.
-    // When ES8311 handles both DAC and ADC (CUBE32_AUDIO_ADC_ES8311), use BOTH mode so
+    // When ES8311 handles both DAC and ADC (adc_source == ES8311), use BOTH mode so
     // the chip is initialized ONCE with all paths enabled.  A second es8311_codec_new()
     // in ADC-only mode would trigger a chip software-reset ("Work in Slave mode") that
     // blows away the DAC register state set here — causing broken audio and, indirectly,
@@ -426,11 +481,9 @@ cube32_result_t AudioCodec::initOutputCodec() {
     es8311_codec_cfg_t es8311_cfg = {};
     es8311_cfg.ctrl_if = m_out_ctrl_if;
     es8311_cfg.gpio_if = m_gpio_if;
-#ifdef CUBE32_AUDIO_ADC_ES8311
-    es8311_cfg.codec_mode = ESP_CODEC_DEV_WORK_MODE_BOTH;  // DAC + ADC, one init
-#else
-    es8311_cfg.codec_mode = ESP_CODEC_DEV_WORK_MODE_DAC;
-#endif
+    es8311_cfg.codec_mode = (m_config.adc_source == AdcSource::ES8311)
+                            ? ESP_CODEC_DEV_WORK_MODE_BOTH   // integrated: DAC + ADC, one init
+                            : ESP_CODEC_DEV_WORK_MODE_DAC;   // dedicated module: DAC only
     es8311_cfg.pa_pin = m_config.pa_pin;  // GPIO_NUM_NC since PA is controlled via TCA9554
     es8311_cfg.use_mclk = true;
     // Hardware gain settings - affects volume calculation
@@ -580,18 +633,27 @@ void AudioCodec::enableInput(bool enable) {
         ESP_LOGI(TAG, "Enabling audio input...");
         // ES8311: 1 mic channel.  ES7210: 4 TDM channels (mic[0..3]).
         int ch = (m_config.adc_source == AdcSource::ES8311) ? 1 : 4;
+        ESP_LOGI(TAG, "  [DBG] Opening input: %d ch, %d Hz, DIN=GPIO%d",
+                 ch, m_config.input_sample_rate, (int)m_config.din_pin);
+        // The esp_codec_dev I2S data interface reconfigures TDM from this
+        // sample-info structure when opening the device.  A mask containing
+        // only channel 0 previously overwrote the four-slot setup above with
+        // slot_mask=0x1 (as seen in the diagnostic log), so only one TDM slot
+        // was clocked/captured. Preserve all ES7210 data slots explicitly.
+        const uint16_t input_channel_mask =
+            (m_config.adc_source == AdcSource::ES7210)
+                ? (ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) |
+                   ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1) |
+                   ESP_CODEC_DEV_MAKE_CHANNEL_MASK(2) |
+                   ESP_CODEC_DEV_MAKE_CHANNEL_MASK(3))
+                : ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0);
         esp_codec_dev_sample_info_t fs = {
             .bits_per_sample = 16,
             .channel = (uint8_t)ch,
-            .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
+            .channel_mask = input_channel_mask,
             .sample_rate = (uint32_t)m_config.input_sample_rate,
             .mclk_multiple = 0,
         };
-
-        // HW AEC reference channel only valid for ES7210 (ch1 = speaker loopback)
-        if (m_config.adc_source == AdcSource::ES7210 && m_aec_mode == AecMode::HW) {
-            fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
-        }
 
         esp_err_t err = esp_codec_dev_open(m_input_dev, &fs);
         if (err != ESP_OK) {
@@ -606,7 +668,7 @@ void AudioCodec::enableInput(bool enable) {
             err = esp_codec_dev_set_in_gain(m_input_dev, (float)m_input_gain);
         } else {
             err = esp_codec_dev_set_in_channel_gain(m_input_dev,
-                ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), (float)m_input_gain);
+                input_channel_mask, (float)m_input_gain);
         }
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "Failed to set input gain (%d dB): %s",
@@ -646,6 +708,25 @@ int AudioCodec::read(int16_t* dest, int samples) {
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Read error: %s", esp_err_to_name(err));
         return 0;
+    }
+
+    // Sample-level diagnostics: log max absolute value to detect silent capture.
+    // Logs for the first 5 reads and every 50 thereafter (~1.6 s at 16kHz/512 samples).
+    static uint32_t s_read_count = 0;
+    ++s_read_count;
+    if (s_read_count <= 5 || (s_read_count % 50) == 0) {
+        int16_t max_abs = 0;
+        for (int i = 0; i < samples; i++) {
+            int16_t v = dest[i] >= 0 ? dest[i] : (int16_t)(-dest[i]);
+            if (v > max_abs) max_abs = v;
+        }
+        /*if (max_abs < 32) {
+            ESP_LOGW(TAG, "[DBG] read #%lu: n=%d max_abs=%d <<< SILENT — ES7210 not capturing",
+                     (unsigned long)s_read_count, samples, (int)max_abs);
+        } else {
+            ESP_LOGI(TAG, "[DBG] read #%lu: n=%d max_abs=%d",
+                     (unsigned long)s_read_count, samples, (int)max_abs);
+        }*/
     }
 
     return samples;
@@ -727,6 +808,10 @@ esp_err_t AudioCodec::setOutputVolume(int volume) {
     if (volume > 100) volume = 100;
     
     m_output_volume = volume;
+    // Examples re-create the codec to switch the AEC sample rate. Keep the
+    // public configuration in sync so a slider value chosen while output is
+    // closed is applied when that new output device is opened.
+    m_config.output_volume = volume;
     esp_err_t ret = ESP_OK;
     if (m_output_enabled && m_output_dev != nullptr) {
         ret = esp_codec_dev_set_out_vol(m_output_dev, volume);

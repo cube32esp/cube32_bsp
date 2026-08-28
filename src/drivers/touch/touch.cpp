@@ -11,6 +11,7 @@
 // Include touch IC specific headers
 #include <esp_lcd_touch_cst816s.h>
 #include <esp_lcd_touch_ft5x06.h>
+#include <esp_lcd_touch_gt911.h>
 
 static const char* TAG = "cube32_touch";
 
@@ -104,6 +105,10 @@ cube32_result_t Touch::begin(const cube32_touch_config_t& config) {
         case CUBE32_TOUCH_IC_FT6336:
             ESP_LOGI(TAG, "  IC Type: FT6336 (FT5x06)");
             ret = initFT6336();
+            break;
+        case CUBE32_TOUCH_IC_GT911:
+            ESP_LOGI(TAG, "  IC Type: GT911");
+            ret = initGT911();
             break;
         default:
             ESP_LOGE(TAG, "Unknown touch IC type: %d", m_config.ic_type);
@@ -236,6 +241,82 @@ cube32_result_t Touch::initFT6336() {
         m_io_handle = nullptr;
         return esp_err_to_cube32(ret);
     }
+
+    return CUBE32_OK;
+}
+
+cube32_result_t Touch::initGT911() {
+    // GT911's I2C address is runtime-selected (0x5D primary, 0x14 backup)
+    // via an INT-pin strap at power-on. hw_manifest.cpp detects which one
+    // responded and passes it through m_config.i2c_addr; fall back to the
+    // driver's built-in default if not set.
+    uint8_t dev_addr = m_config.i2c_addr ? m_config.i2c_addr : ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS;
+
+    // Create I2C panel IO for GT911
+    // Note: ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG() has out-of-order designated
+    // initializers (scl_speed_hz before dev_addr) which is a C++20 error,
+    // same issue already hit and fixed for CST816S above. Manually
+    // initialize in struct declaration order instead of using the macro.
+    esp_lcd_panel_io_i2c_config_t io_config = {
+        .dev_addr           = dev_addr,
+        .on_color_trans_done = nullptr,
+        .user_ctx           = nullptr,
+        .control_phase_bytes = 1,
+        .dc_bit_offset      = 0,
+        .lcd_cmd_bits       = 16,
+        .lcd_param_bits     = 0,
+        .flags = {
+            .dc_low_on_data         = 0,
+            .disable_control_phase  = 1,
+        },
+        .scl_speed_hz = 400000,
+    };
+
+    // Note: Using shared I2C bus - increase timeout for concurrent access
+    // This helps when audio codec is using I2C simultaneously
+
+    esp_err_t ret = esp_lcd_new_panel_io_i2c(
+        I2CBus::instance().getHandle(),
+        &io_config,
+        &m_io_handle
+    );
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create I2C panel IO: %s", esp_err_to_name(ret));
+        return esp_err_to_cube32(ret);
+    }
+
+    // Configure touch panel
+    // Note: x_max/y_max should be the max coordinate value (resolution - 1)
+    // for correct mirror calculations in esp_lcd_touch
+    esp_lcd_touch_config_t tp_cfg = {
+        .x_max = (uint16_t)(m_config.h_res - 1),
+        .y_max = (uint16_t)(m_config.v_res - 1),
+        .rst_gpio_num = (gpio_num_t)m_config.rst_pin,
+        .int_gpio_num = (gpio_num_t)m_config.int_pin,
+        .levels = {
+            .reset = 0,
+            .interrupt = 0,
+        },
+        .flags = {
+            .swap_xy = m_config.swap_xy ? 1u : 0u,
+            .mirror_x = m_config.mirror_x ? 1u : 0u,
+            .mirror_y = m_config.mirror_y ? 1u : 0u,
+        },
+        .process_coordinates = nullptr,
+        .interrupt_callback = nullptr,
+        .user_data = nullptr,
+        .driver_data = nullptr,
+    };
+
+    ret = esp_lcd_touch_new_i2c_gt911(m_io_handle, &tp_cfg, &m_touch_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create GT911 touch: %s", esp_err_to_name(ret));
+        esp_lcd_panel_io_del(m_io_handle);
+        m_io_handle = nullptr;
+        return esp_err_to_cube32(ret);
+    }
+
+    ESP_LOGI(TAG, "  I2C address: 0x%02X", dev_addr);
 
     return CUBE32_OK;
 }

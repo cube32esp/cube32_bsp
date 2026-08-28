@@ -94,11 +94,9 @@ struct AudioCodecConfig {
     int input_gain = 30;                 ///< Input gain in dB
     AecMode aec_mode = AecMode::HW;      ///< AEC mode
 #endif
-#ifdef CUBE32_AUDIO_ADC_ES8311
-    AdcSource adc_source = AdcSource::ES8311; ///< ADC input source
-#else
-    AdcSource adc_source = AdcSource::ES7210; ///< ADC input source
-#endif
+    // ADC source — always overridden at runtime by cube32.cpp from the hw manifest scan.
+    // Default here is ES7210 (safe fallback; never used when cube32_init() is called normally).
+    AdcSource adc_source = AdcSource::ES7210; ///< ADC input source (set at runtime from ES8311 I2C address)
     
     // I2S GPIO pins
     gpio_num_t mclk_pin = (gpio_num_t)CUBE32_AUDIO_I2S_MCLK_PIN;
@@ -290,11 +288,27 @@ public:
     int getOutputSampleRate() const { return m_config.output_sample_rate; }
     int getInputChannels() const {
         if (m_config.adc_source == AdcSource::ES8311) return 1;
-        return m_aec_mode == AecMode::HW ? 2 : 1;
+        // ES7210 is clocked as four-slot TDM whenever the Dedicated Audio
+        // Module is selected. Applications must read complete TDM frames and
+        // choose/deinterleave the desired microphone channel themselves.
+        return 4;
     }
     bool isDuplex() const { return true; }
     AecMode getAecMode() const { return m_aec_mode; }
     bool hasInputReference() const { return m_aec_mode == AecMode::HW; }
+
+    /**
+     * @brief Return the active configuration (set by the last begin(config) call).
+     *
+     * Use this as a base when reinitialising the codec so that hw-detected
+     * settings (ES8311 I2C address, ADC source, PA pin) are preserved:
+     *   @code
+     *   cube32::AudioCodecConfig cfg = codec.getConfig();
+     *   cfg.output_sample_rate = 16000;
+     *   codec.end(); codec.begin(cfg);
+     *   @endcode
+     */
+    const AudioCodecConfig& getConfig() const { return m_config; }
 
     // ========================================================================
     // PA & Earphone Jack Control
@@ -358,7 +372,8 @@ private:
 
     // Configuration
     AudioCodecConfig m_config;
-    bool m_initialized = false;
+    bool m_initialized   = false;
+    bool m_config_valid  = false;  ///< true after the first begin(config) call; begin() reuses m_config
     bool m_input_enabled = false;
     bool m_output_enabled = false;
     AecMode m_aec_mode = AecMode::HW;

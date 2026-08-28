@@ -1,4 +1,4 @@
-# CUBE32 sdkconfig.defaults — hello_modem_console
+# CUBE32 sdkconfig.defaults — hello_audio_loopback
 # Applied first by ESP-IDF; target-specific overrides go in sdkconfig.defaults.<target>
 
 # ---------------------------------------------------------------------------
@@ -43,13 +43,11 @@ CONFIG_NEWLIB_NANO_FORMAT=y
 CONFIG_UART_ISR_IN_IRAM=y
 
 # ---------------------------------------------------------------------------
-# CUBE32 Board — always required
+# CUBE32 Board Configuration — synchronized from CUBE32_IDF_DEV_1
 # ---------------------------------------------------------------------------
 CONFIG_CUBE32_BOARD_S3_CORE=y
 
-# ---------------------------------------------------------------------------
-# CUBE32 Subsystems — enabled for the modem-console UI
-# ---------------------------------------------------------------------------
+# Display Configuration
 CONFIG_CUBE32_DISPLAY_ENABLED=y
 CONFIG_CUBE32_LVGL_ENABLED=y
 CONFIG_CUBE32_LVGL_DOUBLE_BUFFER=y
@@ -57,55 +55,35 @@ CONFIG_CUBE32_LVGL_USE_SPIRAM=y
 CONFIG_CUBE32_LVGL_BUFFER_LINES=20
 CONFIG_CUBE32_LVGL_TASK_PRIORITY=4
 CONFIG_CUBE32_LVGL_TASK_STACK_SIZE=8192
+
+# Touch Configuration
 CONFIG_CUBE32_TOUCH_ENABLED=y
-CONFIG_CUBE32_IMU_ENABLED=n
-CONFIG_CUBE32_MAG_ENABLED=n
-CONFIG_CUBE32_AUDIO_ENABLED=n
-CONFIG_CUBE32_SDCARD_ENABLED=n
-CONFIG_CUBE32_CAMERA_ENABLED=n
-CONFIG_CUBE32_MODEM_ENABLED=y
-CONFIG_CUBE32_PMU_ENABLED=y
-CONFIG_CUBE32_BLE_OTA_ENABLED=y
-CONFIG_CUBE32_RTC_ENABLED=y
+
+# Audio Configuration
+CONFIG_CUBE32_AUDIO_ENABLED=y
+CONFIG_CUBE32_AUDIO_INPUT_SAMPLE_RATE=16000
+CONFIG_CUBE32_AUDIO_OUTPUT_SAMPLE_RATE=24000
+CONFIG_CUBE32_AUDIO_OUTPUT_VOLUME=70
+CONFIG_CUBE32_AUDIO_INPUT_GAIN=30
+CONFIG_CUBE32_AUDIO_AEC_HW=y
 CONFIG_CUBE32_ADC_BUTTON_ENABLED=n
 
-# ---------------------------------------------------------------------------
-# CUBE32 WiFi Configuration — development-project defaults
-# ---------------------------------------------------------------------------
-CONFIG_CUBE32_WIFI_SSID="myssid"
-CONFIG_CUBE32_WIFI_PASSWORD="mypassword"
-CONFIG_CUBE32_WIFI_SAE_PWE_BOTH=y
-CONFIG_CUBE32_WIFI_PW_ID=""
-CONFIG_CUBE32_WIFI_MAX_RETRY=5
-CONFIG_CUBE32_WIFI_AUTH_WPA2_PSK=y
+# Remaining CUBE32 subsystems
+CONFIG_CUBE32_IMU_ENABLED=n
+CONFIG_CUBE32_MAG_ENABLED=n
+CONFIG_CUBE32_SDCARD_ENABLED=n
+CONFIG_CUBE32_CAMERA_ENABLED=n
+CONFIG_CUBE32_MODEM_ENABLED=n
+CONFIG_CUBE32_PMU_ENABLED=y
+CONFIG_CUBE32_BLE_OTA_ENABLED=y
+CONFIG_CUBE32_BLE_OTA_DOUBLE_BOOT_ENABLE=n
+CONFIG_CUBE32_BLE_OTA_MTU_SIZE=512
+CONFIG_CUBE32_RTC_ENABLED=y
 
 # ---------------------------------------------------------------------------
-# [OPTIONAL] TLS / MbedTLS — required for HTTPS (esp_http_client / esp_tls)
+# [OPTIONAL] Audio codec I2C — required by CONFIG_CUBE32_AUDIO_ENABLED
 # ---------------------------------------------------------------------------
-CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
-CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=n
-CONFIG_MBEDTLS_SSL_RENEGOTIATION=n
-
-# ---------------------------------------------------------------------------
-# Modem — A7670 over UART, with ESP Modem and PPP support
-# ---------------------------------------------------------------------------
-CONFIG_ESP_MODEM_ADD_FLOW_CONTROL=y
-CONFIG_ESP_MODEM_CMUX_DEFRAGMENT_PAYLOAD=y
-CONFIG_ESP_MODEM_PPP_SERVER_SUPPORT=y
-
-# PPP stack support — enables ESP_NETIF_DEFAULT_PPP() in esp_netif_ppp.h.
-CONFIG_PPP_SUPPORT=y
-CONFIG_PPP_PAP_SUPPORT=y
-CONFIG_PPP_CHAP_SUPPORT=y
-CONFIG_PPP_MSCHAP_SUPPORT=y
-CONFIG_PPP_MPPE_SUPPORT=y
-
-# USB Host for A7670 modem
-# WARNING: TinyUSB (USB Device) MUST be disabled — it conflicts with USB Host
-CONFIG_TINYUSB_ENABLED=n
-CONFIG_USB_OTG_SUPPORTED=y
-CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=1024
-CONFIG_USB_HOST_HW_BUFFER_BIAS_BALANCED=y
+CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
 
 # ---------------------------------------------------------------------------
 # [ALWAYS ON] Bluetooth — NimBLE required by CUBE32_BLE_OTA_ENABLED
@@ -122,13 +100,14 @@ CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=24
 CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=32
 
 # ---------------------------------------------------------------------------
-# LVGL 9.x — synchronized with the CUBE32 development modem-console profile
-# Fonts: 10/20/24 are required by ble_ota_ui.cpp; 12/14/32 are profile fonts.
+# LVGL 9.x built-in fonts — synchronized from CUBE32_IDF_DEV_1
+# 10, 20, and 24 are required by ble_ota_ui.cpp; 12 and 14 are used by this UI.
 # ---------------------------------------------------------------------------
 CONFIG_LV_USE_CLIB_MALLOC=y
 CONFIG_LV_USE_CLIB_STRING=y
 CONFIG_LV_USE_CLIB_SPRINTF=y
 CONFIG_LV_FONT_MONTSERRAT_10=y
+CONFIG_LV_FONT_MONTSERRAT_12=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_24=y
-CONFIG_LV_FONT_MONTSERRAT_32=y

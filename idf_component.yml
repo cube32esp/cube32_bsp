@@ -1,6 +1,6 @@
 ## CUBE32 Board Support Package
-version: "0.0.13"
-description: "CUBE32 Board Support Package for ESP32-S3 — AI-ready hardware drivers for display, touch, IMU, audio, camera, LTE modem, PMU, RTC, and more"
+version: "0.0.14"
+description: "CUBE32 Board Support Package for ESP32-S3 — AI-ready hardware drivers for ST7789/ST7796 displays, CST816S/FT5x06/GT911 touch, IMU, audio, camera, LTE modem, PMU, RTC, and more"
 url: "https://github.com/cube32esp/cube32_bsp"
 repository: "https://github.com/cube32esp/cube32_bsp.git"
 issues: "https://github.com/cube32esp/cube32_bsp/issues"
@@ -14,6 +14,7 @@ tags:
   - bsp
   - esp32s3
   - display
+  - st7796
   - camera
   - audio
   - imu
@@ -21,6 +22,7 @@ tags:
   - lvgl
   - iot
   - touch
+  - gt911
   - pmu
 
 files:

@@ -1,13 +1,20 @@
 /**
  * @file sdcard.h
- * @brief CUBE32 SD Card Driver (SDMMC Interface)
+ * @brief CUBE32 SD Card Driver (SDMMC + SPI Interface)
  * 
- * This driver provides support for SD cards using the SDMMC peripheral.
- * Uses ESP-IDF's FATFS integration for file system operations.
+ * This driver provides support for SD cards using either the SDMMC peripheral
+ * or the SPI peripheral (shared with the TFT display on SPI2_HOST).
+ * 
+ * Interface selection:
+ *   AUTO (default) — reads the hardware manifest at runtime:
+ *     • ES8311 @ 0x19 detected  → CUBE32 S3 Audio (integrated) → SPI mode
+ *                                  (shared SPI2_HOST, CS = GPIO 5)
+ *     • Otherwise               → SDMMC mode (CMD/CLK/D0 = GPIO 7/15/4)
+ *   SDMMC / SPI  — forced selection, ignores hardware manifest
  * 
  * Features:
  * - SD card initialization and mounting with FATFS
- * - Card status information (size, type, speed)
+ * - Card status information (size, type, speed, interface)
  * - Directory listing
  * - File read/write operations
  * - Read/write speed testing
@@ -22,6 +29,7 @@
 #include <esp_vfs_fat.h>
 #include <sdmmc_cmd.h>
 #include <driver/sdmmc_host.h>
+#include <driver/sdspi_host.h>
 
 #include <string>
 #include <vector>
@@ -60,26 +68,46 @@ extern "C" {
 // ============================================================================
 
 /**
+ * @brief SD card interface selection
+ */
+typedef enum {
+    CUBE32_SDCARD_IFACE_AUTO  = 0, ///< Auto-detect from hardware manifest at begin()
+    CUBE32_SDCARD_IFACE_SDMMC = 1, ///< SDMMC peripheral (CMD/CLK/D0 pins)
+    CUBE32_SDCARD_IFACE_SPI   = 2, ///< SPI peripheral shared with TFT (SPI2_HOST, CS=GPIO5)
+} cube32_sdcard_iface_t;
+
+/**
  * @brief SD card configuration structure
  */
 typedef struct {
-    gpio_num_t pin_cmd;              ///< CMD pin
-    gpio_num_t pin_clk;              ///< CLK pin
-    gpio_num_t pin_d0;               ///< D0 pin (required for 1-bit and 4-bit mode)
-    gpio_num_t pin_d1;               ///< D1 pin (optional, for 4-bit mode)
-    gpio_num_t pin_d2;               ///< D2 pin (optional, for 4-bit mode)
-    gpio_num_t pin_d3;               ///< D3 pin (optional, for 4-bit mode)
+    /* SDMMC fields */
+    gpio_num_t pin_cmd;              ///< CMD pin (SDMMC mode)
+    gpio_num_t pin_clk;              ///< CLK pin (SDMMC mode)
+    gpio_num_t pin_d0;               ///< D0 pin (SDMMC mode, 1-bit and 4-bit)
+    gpio_num_t pin_d1;               ///< D1 pin (SDMMC mode, 4-bit only)
+    gpio_num_t pin_d2;               ///< D2 pin (SDMMC mode, 4-bit only)
+    gpio_num_t pin_d3;               ///< D3 pin (SDMMC mode, 4-bit only)
     gpio_num_t pin_cd;               ///< Card detect pin (GPIO_NUM_NC if not used)
     gpio_num_t pin_wp;               ///< Write protect pin (GPIO_NUM_NC if not used)
-    uint8_t bus_width;               ///< Bus width (1 or 4)
-    uint32_t max_freq_khz;           ///< Maximum clock frequency in kHz
-    const char* mount_point;         ///< Mount point path
+    uint8_t bus_width;               ///< Bus width (1 or 4) for SDMMC mode
+    uint32_t max_freq_khz;           ///< Maximum SDMMC clock frequency in kHz
+    /* Common fields */
+    const char* mount_point;         ///< VFS mount point path
     bool format_if_mount_failed;     ///< Format card if mount fails
-    int max_files;                   ///< Maximum number of open files
+    int max_files;                   ///< Maximum number of simultaneously open files
+    /* Interface selection */
+    cube32_sdcard_iface_t iface;     ///< Interface: AUTO (default), SDMMC, or SPI
+    /* SPI-mode fields (used when iface == CUBE32_SDCARD_IFACE_SPI or AUTO→SPI) */
+    spi_host_device_t spi_host;      ///< SPI host device (e.g. SPI2_HOST, shared with TFT)
+    gpio_num_t pin_cs;               ///< SPI chip-select GPIO
+    uint32_t spi_freq_khz;           ///< SPI clock frequency in kHz
 } cube32_sdcard_config_t;
 
 /**
  * @brief Default SD card configuration using pins from cube32_config.h
+ *
+ * Interface defaults to AUTO: the driver detects the board at begin() by
+ * querying the hardware manifest and selects SDMMC or SPI automatically.
  */
 #define CUBE32_SDCARD_CONFIG_DEFAULT() { \
     .pin_cmd = CUBE32_SD_CMD_PIN, \
@@ -95,6 +123,10 @@ typedef struct {
     .mount_point = CUBE32_SDCARD_MOUNT_POINT, \
     .format_if_mount_failed = false, \
     .max_files = 5, \
+    .iface = CUBE32_SDCARD_IFACE_AUTO, \
+    .spi_host = CUBE32_SD_SPI_HOST, \
+    .pin_cs = CUBE32_SD_SPI_CS_PIN, \
+    .spi_freq_khz = CUBE32_SD_SPI_FREQ_KHZ, \
 }
 
 /**
@@ -148,26 +180,27 @@ namespace cube32 {
 // ============================================================================
 
 /**
- * @brief SD Card Driver Class (SDMMC Interface)
+ * @brief SD Card Driver Class (SDMMC + SPI Interface, auto-detected)
  * 
- * Object-oriented interface for SD card operations using SDMMC peripheral.
- * Uses ESP-IDF's FATFS for file system support.
+ * Object-oriented interface for SD card operations.  The physical interface
+ * is selected automatically from the hardware manifest (see sdcard.h header
+ * for the detection rules), or can be forced via begin(config).
  * 
  * Usage:
  * @code
  *   cube32::SDCard& sd = cube32::SDCard::instance();
  *   if (sd.begin() == CUBE32_OK) {
  *       auto status = sd.getStatus();
- *       ESP_LOGI(TAG, "Card: %s, Size: %llu MB", 
- *                status.card_type, status.total_bytes / (1024 * 1024));
+ *       ESP_LOGI(TAG, "Card: %s via %s, %lu MB",
+ *                status.card_type, sd.getInterfaceName(),
+ *                (unsigned long)(status.total_bytes / (1024*1024)));
  *       
- *       // List root directory
  *       std::vector<cube32_sdcard_entry_t> entries;
  *       sd.listDirectory("/", entries);
  *       for (const auto& e : entries) {
- *           ESP_LOGI(TAG, "%s %s (%lu bytes)", 
+ *           ESP_LOGI(TAG, "%s %s (%lu B)",
  *                    e.is_directory ? "[DIR]" : "[FILE]",
- *                    e.name, e.size);
+ *                    e.name, (unsigned long)e.size);
  *       }
  *   }
  * @endcode
@@ -249,6 +282,20 @@ public:
      * @brief Check if SD card is mounted
      */
     bool isMounted() const { return m_mounted; }
+
+    /**
+     * @brief Get the active physical interface
+     * @return CUBE32_SDCARD_IFACE_SDMMC or CUBE32_SDCARD_IFACE_SPI
+     */
+    cube32_sdcard_iface_t getInterface() const { return m_iface; }
+
+    /**
+     * @brief Get the active interface as a human-readable string
+     * @return "SDMMC" or "SPI"
+     */
+    const char* getInterfaceName() const {
+        return (m_iface == CUBE32_SDCARD_IFACE_SPI) ? "SPI" : "SDMMC";
+    }
 
     /**
      * @brief Get SD card status information
@@ -384,6 +431,21 @@ public:
     int64_t getFileSize(const char* path);
 
     /**
+     * @brief Run a read/write speed test
+     *
+     * Writes @p testSize bytes of known-pattern data to a temporary file,
+     * reads it back, calculates throughput, deletes the file, and returns
+     * the results.
+     *
+     * @param testSize    Total bytes to transfer (default 256 KB)
+     * @param bufferSize  I/O chunk size in bytes (default 4 KB)
+     * @return Speed test result struct
+     */
+    cube32_sdcard_speed_result_t runSpeedTest(
+        size_t testSize   = CUBE32_SDCARD_TEST_FILE_SIZE,
+        size_t bufferSize = CUBE32_SDCARD_TEST_BUFFER_SIZE);
+
+    /**
      * @brief Print card info to log
      */
     void printCardInfo() const;
@@ -399,11 +461,27 @@ private:
      */
     std::string buildPath(const char* path) const;
 
-    cube32_sdcard_config_t m_config = CUBE32_SDCARD_CONFIG_DEFAULT();
-    sdmmc_card_t* m_card = nullptr;
-    bool m_initialized = false;
-    bool m_mounted = false;
-    bool m_cardPresent = false;  ///< Last known card presence state
+    /**
+     * @brief Mount using SDMMC peripheral
+     */
+    cube32_result_t mountSdmmc(const cube32_sdcard_config_t& config);
+
+    /**
+     * @brief Mount using SPI peripheral (shared SPI2_HOST)
+     */
+    cube32_result_t mountSpi(const cube32_sdcard_config_t& config);
+
+    /**
+     * @brief Perform interface-specific unmount and host cleanup
+     */
+    void unmountInternal();
+
+    cube32_sdcard_config_t  m_config       = CUBE32_SDCARD_CONFIG_DEFAULT();
+    sdmmc_card_t*           m_card         = nullptr;
+    bool                    m_initialized  = false;
+    bool                    m_mounted      = false;
+    bool                    m_cardPresent  = false;
+    cube32_sdcard_iface_t   m_iface        = CUBE32_SDCARD_IFACE_SDMMC;
 };
 
 } // namespace cube32

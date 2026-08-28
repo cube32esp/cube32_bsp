@@ -34,7 +34,8 @@ Navigate to `CUBE32 Display Configuration` in menuconfig:
 | Setting | Required Value | Notes |
 |---------|----------------|-------|
 | **Enable Display** | `y` (enabled) | Must be enabled |
-| **Display Board Model** | Select your board | Determines display resolution (e.g., CUBE32_DISPLAY_CUBE_TFT_TOUCH_154 = 240x240) |
+
+> Display resolution/rotation is auto-detected at boot from the touch controller's I2C address (see `CUBE32_DISPLAY_MODEL_TABLE` in `cube32_config.h`) — no Kconfig selection needed.
 
 ### Optional: LVGL Configuration
 

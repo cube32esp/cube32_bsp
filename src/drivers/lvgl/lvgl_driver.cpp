@@ -5,6 +5,7 @@
 
 #include "drivers/lvgl/lvgl_driver.h"
 #include "drivers/pmu/axp2101.h"
+#include "utils/hw_manifest.h"
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_lcd_panel_ops.h>
@@ -12,6 +13,69 @@
 static const char* TAG = "cube32_lvgl";
 
 namespace cube32 {
+
+// ============================================================================
+// Active display dispatch helpers
+// ============================================================================
+// LvglDisplay supports both ST7789Display and ST7796Display, which expose
+// identical public method signatures (duck-typed, no shared base class -
+// see st7796.h file header). These helpers route to whichever one is
+// active, based on m_active_display_ic (resolved from the hardware
+// manifest at the top of begin()).
+
+bool LvglDisplay::activeIsInitialized() const {
+    return (m_active_display_ic == CUBE32_DISPLAY_IC_ST7796)
+        ? ST7796Display::instance().isInitialized()
+        : ST7789Display::instance().isInitialized();
+}
+
+esp_lcd_panel_handle_t LvglDisplay::activePanelHandle() const {
+    return (m_active_display_ic == CUBE32_DISPLAY_IC_ST7796)
+        ? ST7796Display::instance().getPanelHandle()
+        : ST7789Display::instance().getPanelHandle();
+}
+
+esp_lcd_panel_io_handle_t LvglDisplay::activeIOHandle() const {
+    return (m_active_display_ic == CUBE32_DISPLAY_IC_ST7796)
+        ? ST7796Display::instance().getIOHandle()
+        : ST7789Display::instance().getIOHandle();
+}
+
+uint16_t LvglDisplay::activeBaseWidth() const {
+    return (m_active_display_ic == CUBE32_DISPLAY_IC_ST7796)
+        ? ST7796Display::instance().getBaseWidth()
+        : ST7789Display::instance().getBaseWidth();
+}
+
+uint16_t LvglDisplay::activeBaseHeight() const {
+    return (m_active_display_ic == CUBE32_DISPLAY_IC_ST7796)
+        ? ST7796Display::instance().getBaseHeight()
+        : ST7789Display::instance().getBaseHeight();
+}
+
+uint16_t LvglDisplay::activeWidth() const {
+    return (m_active_display_ic == CUBE32_DISPLAY_IC_ST7796)
+        ? ST7796Display::instance().getWidth()
+        : ST7789Display::instance().getWidth();
+}
+
+uint16_t LvglDisplay::activeHeight() const {
+    return (m_active_display_ic == CUBE32_DISPLAY_IC_ST7796)
+        ? ST7796Display::instance().getHeight()
+        : ST7789Display::instance().getHeight();
+}
+
+uint16_t LvglDisplay::activeRotation() const {
+    return (m_active_display_ic == CUBE32_DISPLAY_IC_ST7796)
+        ? ST7796Display::instance().getRotation()
+        : ST7789Display::instance().getRotation();
+}
+
+cube32_result_t LvglDisplay::activeSetRotation(uint16_t rotation) {
+    return (m_active_display_ic == CUBE32_DISPLAY_IC_ST7796)
+        ? ST7796Display::instance().setRotation(rotation)
+        : ST7789Display::instance().setRotation(rotation);
+}
 
 // ============================================================================
 // Singleton Implementation
@@ -39,20 +103,24 @@ cube32_result_t LvglDisplay::begin(const cube32_lvgl_config_t& config) {
         return CUBE32_ALREADY_INITIALIZED;
     }
 
-    // Check if ST7789 display is initialized
-    ST7789Display& st7789 = ST7789Display::instance();
-    if (!st7789.isInitialized()) {
-        ESP_LOGE(TAG, "ST7789 display must be initialized before LVGL");
+    // Resolve which concrete display driver is active (ST7789 or ST7796)
+    // from the hardware manifest, populated during hw_manifest_scan().
+    cube32_hw_manifest_t* hw = cube32_hw_manifest();
+    m_active_display_ic = hw->display_ic ? hw->display_ic : CUBE32_DISPLAY_IC_ST7789;
+
+    // Check if the active display driver is initialized
+    if (!activeIsInitialized()) {
+        ESP_LOGE(TAG, "Display driver must be initialized before LVGL");
         return CUBE32_NOT_INITIALIZED;
     }
 
     // Store configuration - use base dimensions
     m_config = config;
-    m_width = st7789.getBaseWidth();
-    m_height = st7789.getBaseHeight();
+    m_width = activeBaseWidth();
+    m_height = activeBaseHeight();
 
-    // Get the configured rotation from ST7789
-    uint16_t configured_rotation = st7789.getRotation();
+    // Get the configured rotation from the active display
+    uint16_t configured_rotation = activeRotation();
 
     ESP_LOGI(TAG, "Initializing LVGL display...");
     ESP_LOGI(TAG, "  Base resolution: %dx%d", m_width, m_height);
@@ -60,10 +128,10 @@ cube32_result_t LvglDisplay::begin(const cube32_lvgl_config_t& config) {
     ESP_LOGI(TAG, "  Double buffer: %s", config.double_buffer ? "yes" : "no");
     ESP_LOGI(TAG, "  Use SPIRAM: %s", config.use_spiram ? "yes" : "no");
 
-    // Reset ST7789 to rotation 0 - LVGL will handle rotation
+    // Reset the display to rotation 0 - LVGL will handle rotation
     if (configured_rotation != 0) {
-        ESP_LOGI(TAG, "Resetting ST7789 to rotation 0 (LVGL will handle rotation)");
-        st7789.setRotation(0);
+        ESP_LOGI(TAG, "Resetting display to rotation 0 (LVGL will handle rotation)");
+        activeSetRotation(0);
     }
 
     // Initialize LVGL port (creates LVGL task and timer)
@@ -103,16 +171,20 @@ cube32_result_t LvglDisplay::begin(const cube32_lvgl_config_t& config) {
         unlock();
     }
 
-    // Now turn on the display panel (it was kept OFF during ST7789 init)
-    esp_lcd_panel_disp_on_off(st7789.getPanelHandle(), true);
+    // Now turn on the display panel (it was kept OFF during display driver init)
+    esp_lcd_panel_disp_on_off(activePanelHandle(), true);
 
     // Now turn on the backlight via PMU (display has content, no white flash)
-    // CUBE32 uses AXP2101 ALDO3 for LCD backlight control
-    PMU& pmu = PMU::instance();
-    if (pmu.isInitialized()) {
-        pmu.setDisplayBacklight(true);
-    } else {
-        ESP_LOGW(TAG, "PMU not initialized, backlight may not work");
+    // CUBE32 uses AXP2101 ALDO3 for LCD backlight control on ST7789 boards.
+    // NOTE: backlight/power-rail control for the ST7796S board is not
+    // implemented yet (board control logic TBD) — skipped for that board.
+    if (m_active_display_ic != CUBE32_DISPLAY_IC_ST7796) {
+        PMU& pmu = PMU::instance();
+        if (pmu.isInitialized()) {
+            pmu.setDisplayBacklight(true);
+        } else {
+            ESP_LOGW(TAG, "PMU not initialized, backlight may not work");
+        }
     }
 
     ESP_LOGI(TAG, "LVGL display initialized successfully");
@@ -150,11 +222,9 @@ cube32_result_t LvglDisplay::initLvglPort(const cube32_lvgl_config_t& config) {
 }
 
 cube32_result_t LvglDisplay::addDisplay(const cube32_lvgl_config_t& config) {
-    ST7789Display& st7789 = ST7789Display::instance();
-    
     // Always use base dimensions - LVGL will handle rotation
-    uint16_t base_width = st7789.getBaseWidth();
-    uint16_t base_height = st7789.getBaseHeight();
+    uint16_t base_width = activeBaseWidth();
+    uint16_t base_height = activeBaseHeight();
     
     // Calculate buffer size using base dimensions
     uint32_t buffer_size = config.buffer_size;
@@ -177,8 +247,8 @@ cube32_result_t LvglDisplay::addDisplay(const cube32_lvgl_config_t& config) {
 
     // Configure display
     lvgl_port_display_cfg_t disp_cfg = {};
-    disp_cfg.io_handle = st7789.getIOHandle();
-    disp_cfg.panel_handle = st7789.getPanelHandle();
+    disp_cfg.io_handle = activeIOHandle();
+    disp_cfg.panel_handle = activePanelHandle();
     disp_cfg.control_handle = nullptr;  // Use panel_handle for control
     disp_cfg.buffer_size = buffer_size;
     disp_cfg.double_buffer = config.double_buffer;
@@ -205,7 +275,12 @@ cube32_result_t LvglDisplay::addDisplay(const cube32_lvgl_config_t& config) {
     disp_cfg.flags.buff_spiram = config.use_spiram;
     disp_cfg.flags.sw_rotate = false;  // Use hardware rotation via ST7789
 #if LVGL_VERSION_MAJOR >= 9
-    disp_cfg.flags.swap_bytes = config.swap_bytes;
+    // esp_lcd_st7796 forwards RAMWR data unchanged. Its controller expects
+    // RGB565 MSB first, so LVGL's CPU-endian RGB565 draw buffer needs byte
+    // conversion before it is sent. ST7789 boards retain their established
+    // configuration from the user-provided LVGL setting.
+    disp_cfg.flags.swap_bytes = config.swap_bytes ||
+                                m_active_display_ic == CUBE32_DISPLAY_IC_ST7796;
 #endif
     disp_cfg.flags.full_refresh = config.full_refresh;
     disp_cfg.flags.direct_mode = config.direct_mode;
@@ -398,10 +473,9 @@ void LvglDisplay::processUsbMouseEvents(lv_indev_data_t *data) {
         
         m_usb_mouse_buttons = mouse_event.buttons;
         
-        // Clamp to display bounds using ST7789's rotated dimensions
-        ST7789Display& st7789 = ST7789Display::instance();
-        int16_t disp_width = st7789.getWidth();
-        int16_t disp_height = st7789.getHeight();
+        // Clamp to display bounds using the active display's rotated dimensions
+        int16_t disp_width = activeWidth();
+        int16_t disp_height = activeHeight();
         
         if (m_usb_mouse_x < 0) m_usb_mouse_x = 0;
         if (m_usb_mouse_x >= disp_width) m_usb_mouse_x = disp_width - 1;
@@ -446,9 +520,8 @@ cube32_result_t LvglDisplay::addUsbMouse() {
     s_lvgl_instance = this;
 
     // Initialize mouse position to center of screen
-    ST7789Display& st7789 = ST7789Display::instance();
-    m_usb_mouse_x = st7789.getWidth() / 2;
-    m_usb_mouse_y = st7789.getHeight() / 2;
+    m_usb_mouse_x = activeWidth() / 2;
+    m_usb_mouse_y = activeHeight() / 2;
     m_usb_mouse_buttons = 0;
 
     // Lock LVGL for thread-safe operations
@@ -592,17 +665,23 @@ cube32_result_t LvglDisplay::setRotation(uint16_t rotation) {
     // which updates the hardware via esp_lcd_panel_swap_xy/mirror
     lv_display_set_rotation(m_display, lv_rotation);
 
-    // Update the gap/offset for the display
-    // esp_lvgl_port handles swap_xy and mirror, but NOT the gap setting
-    // For 240x240 display on ST7789 (320x240 internal), we need to adjust offset
-    ST7789Display& st7789 = ST7789Display::instance();
-    uint16_t base_width = st7789.getBaseWidth();
-    uint16_t base_height = st7789.getBaseHeight();
+    // Update the gap/offset for the display.
+    // esp_lvgl_port handles swap_xy and mirror, but NOT the gap setting.
+    // The ST7789 240x240 panel uses an 80-pixel offset in its 320x240 GRAM.
+    // This ST7796 panel's vendor setup selects 320 active gates, but its
+    // controller GRAM retains a 480-row address axis. Rotation 90 maps that
+    // axis to X and rotation 180 maps it to Y, requiring the corresponding
+    // 160-pixel viewport offset. Rotations 0 and 270 use the origin.
+    uint16_t base_width = activeBaseWidth();
+    uint16_t base_height = activeBaseHeight();
     
     // Calculate offset for displays smaller than internal buffer
     uint16_t offset = 0;
     if (base_width == 240 && base_height == 240) {
         offset = 80;  // ST7789 internal is 320x240, display is 240x240
+    } else if (m_active_display_ic == CUBE32_DISPLAY_IC_ST7796 &&
+               base_width == 320 && base_height == 320) {
+        offset = 160; // ST7796 GRAM is 320x480; the visible viewport is 320x320
     }
     
     uint16_t x_gap = 0;
@@ -627,16 +706,16 @@ cube32_result_t LvglDisplay::setRotation(uint16_t rotation) {
     }
     
     ESP_LOGI(TAG, "Setting gap: x_gap=%d, y_gap=%d (offset=%d)", x_gap, y_gap, offset);
-    esp_lcd_panel_set_gap(st7789.getPanelHandle(), x_gap, y_gap);
+    esp_lcd_panel_set_gap(activePanelHandle(), x_gap, y_gap);
 
     // Update cached dimensions based on rotation
     // For 90/270, width and height are swapped
     if (rotation == 90 || rotation == 270) {
-        m_width = st7789.getBaseHeight();
-        m_height = st7789.getBaseWidth();
+        m_width = base_height;
+        m_height = base_width;
     } else {
-        m_width = st7789.getBaseWidth();
-        m_height = st7789.getBaseHeight();
+        m_width = base_width;
+        m_height = base_height;
     }
 
     // Force full screen refresh

@@ -1,5 +1,4 @@
 # CUBE32 sdkconfig.defaults — hello_display
-# Minimal configuration: display only. No LVGL, Touch, IMU, Audio, Camera, or WiFi.
 # Applied first by ESP-IDF; target-specific overrides go in sdkconfig.defaults.<target>
 
 # ---------------------------------------------------------------------------
@@ -49,10 +48,11 @@ CONFIG_UART_ISR_IN_IRAM=y
 CONFIG_CUBE32_BOARD_S3_CORE=y
 
 # ---------------------------------------------------------------------------
-# CUBE32 Subsystems — enable what this example uses; disable the rest
+# CUBE32 Subsystems — display-only example
 # ---------------------------------------------------------------------------
 CONFIG_CUBE32_DISPLAY_ENABLED=y
-CONFIG_CUBE32_DISPLAY_CUBE_TFT_TOUCH_154=y
+# Display board model (resolution/rotation) is auto-detected at boot from the
+# touch controller's I2C address — no Kconfig selection needed.
 
 CONFIG_CUBE32_LVGL_ENABLED=n
 CONFIG_CUBE32_TOUCH_ENABLED=n
@@ -62,8 +62,70 @@ CONFIG_CUBE32_AUDIO_ENABLED=n
 CONFIG_CUBE32_SDCARD_ENABLED=n
 CONFIG_CUBE32_CAMERA_ENABLED=n
 CONFIG_CUBE32_MODEM_ENABLED=n
-CONFIG_CUBE32_PMU_ENABLED=y        # always on — system power depends on AXP2101
-CONFIG_CUBE32_BLE_OTA_ENABLED=y    # always on — allows communication with CUBE32 mobile app
+CONFIG_CUBE32_PMU_ENABLED=y
+CONFIG_CUBE32_BLE_OTA_ENABLED=y
+CONFIG_CUBE32_RTC_ENABLED=y
+CONFIG_CUBE32_ADC_BUTTON_ENABLED=n
+
+# ---------------------------------------------------------------------------
+# [OPTIONAL] WiFi — add when using network connectivity
+# ---------------------------------------------------------------------------
+# CONFIG_ESP_WIFI_IRAM_OPT=n
+# CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+# CONFIG_ESP_WIFI_DYNAMIC_RX_MGMT_BUFFER=y
+# CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+# CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=8
+# CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+
+# ---------------------------------------------------------------------------
+# [OPTIONAL] HTTP server — add when serving web pages
+# ---------------------------------------------------------------------------
+# CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+# CONFIG_HTTPD_MAX_URI_LEN=2048
+
+# ---------------------------------------------------------------------------
+# [OPTIONAL] TLS / MbedTLS — add when using HTTPS or TLS sockets
+# ---------------------------------------------------------------------------
+# CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+# CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=n
+# CONFIG_MBEDTLS_SSL_RENEGOTIATION=n
+
+# ---------------------------------------------------------------------------
+# [OPTIONAL] Camera — add when CONFIG_CUBE32_CAMERA_ENABLED=y
+# NOTE: DMA_BUFFER_SIZE_MAX must divide the camera frame line size evenly.
+# 8192 is the proven safe value for CUBE32 camera frame sizes (QQVGA/QVGA
+# RGB565). Raising this (e.g. 32768) causes "FB-SIZE: X != Y" mismatch and
+# frame capture timeouts.
+# ---------------------------------------------------------------------------
+# CONFIG_CAMERA_NO_AFFINITY=y
+# CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX=8192
+
+# ---------------------------------------------------------------------------
+# [OPTIONAL] Audio codec I2C — add when CONFIG_CUBE32_AUDIO_ENABLED=y
+# ---------------------------------------------------------------------------
+# CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
+
+# ---------------------------------------------------------------------------
+# [OPTIONAL] Modem — add when CONFIG_CUBE32_MODEM_ENABLED=y
+# ESP Modem configuration for A7670 USB support
+# ---------------------------------------------------------------------------
+# CONFIG_ESP_MODEM_ADD_FLOW_CONTROL=y
+# CONFIG_ESP_MODEM_CMUX_DEFRAGMENT_PAYLOAD=y
+# CONFIG_ESP_MODEM_PPP_SERVER_SUPPORT=y
+#
+# # PPP stack support
+# CONFIG_PPP_SUPPORT=y
+# CONFIG_PPP_PAP_SUPPORT=y
+# CONFIG_PPP_CHAP_SUPPORT=y
+# CONFIG_PPP_MSCHAP_SUPPORT=y
+# CONFIG_PPP_MPPE_SUPPORT=y
+#
+# # USB Host for A7670 modem
+# # WARNING: TinyUSB (USB Device) MUST be disabled — it conflicts with USB Host
+# CONFIG_TINYUSB_ENABLED=n
+# CONFIG_USB_OTG_SUPPORTED=y
+# CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=1024
+# CONFIG_USB_HOST_HW_BUFFER_BIAS_BALANCED=y
 
 # ---------------------------------------------------------------------------
 # [ALWAYS ON] Bluetooth — NimBLE required by CUBE32_BLE_OTA_ENABLED
@@ -73,9 +135,19 @@ CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
-CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=y
 # BLE OTA speed optimisation — larger MTU/ACL/buffers for faster mobile transfer
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=512
 CONFIG_BT_NIMBLE_TRANSPORT_ACL_SIZE=512
 CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=24
 CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=32
+
+# ---------------------------------------------------------------------------
+# [OPTIONAL] LVGL 9.x — not required by hello_display
+# LVGL's Kconfig defaults are sufficient unless the application requires a
+# specific allocator, image decoder, widget, or other LVGL feature override.
+# Enable only the built-in fonts used by the application. The three fonts below
+# are required by ble_ota_ui.cpp when BLE OTA is enabled.
+# ---------------------------------------------------------------------------
+# CONFIG_LV_FONT_MONTSERRAT_10=y  # REQUIRED by ble_ota_ui.cpp — always enable
+# CONFIG_LV_FONT_MONTSERRAT_20=y  # REQUIRED by ble_ota_ui.cpp — always enable
+# CONFIG_LV_FONT_MONTSERRAT_24=y  # REQUIRED by ble_ota_ui.cpp — always enable

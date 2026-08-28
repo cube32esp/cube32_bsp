@@ -84,7 +84,10 @@ static uint16_t s_customer_char_handle = 0;
 static uint16_t s_command_char_handle = 0;
 static uint16_t s_progress_char_handle = 0;
 static bool s_ota_in_progress = false;
-static TimerHandle_t s_adv_restart_timer = NULL;
+// NimBLE NPL callout for deferred advertising restart after disconnect.
+// Runs in the NimBLE host task context (adequate stack), not in Tmr Svc.
+static struct ble_npl_callout s_adv_restart_callout;
+static bool s_adv_callout_initialized = false;
 static uint32_t s_ota_total_len = 0;
 static uint32_t s_ota_received_len = 0;
 
@@ -354,13 +357,15 @@ static int ble_gatt_handler(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
-// One-shot timer callback: restart advertising after the BLE stack has fully
+// NimBLE NPL callout callback: restart advertising after the BLE stack has fully
 // settled post-disconnect. Calling ble_gap_adv_start() directly inside the
 // GAP disconnect event returns BLE_HS_EBUSY because the controller has not yet
 // completed link teardown. A 300 ms deferral avoids this race.
-static void adv_restart_timer_cb(TimerHandle_t xTimer)
+// This runs in the NimBLE host task context — never in Tmr Svc — so it has
+// sufficient stack depth for the NimBLE API calls inside start_advertising().
+static void adv_restart_callout_cb(struct ble_npl_event *ev)
 {
-    (void)xTimer;
+    (void)ev;
     start_advertising();
 }
 
@@ -427,10 +432,11 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
             event->disconnect.reason
         );
         
-        // Restart advertising after disconnect. Defer via timer so the BLE
+        // Restart advertising after disconnect. Defer via callout so the BLE
         // stack finishes teardown before ble_gap_adv_start() is called.
-        if (s_adv_restart_timer) {
-            xTimerStart(s_adv_restart_timer, 0);
+        if (s_adv_callout_initialized) {
+            ble_npl_callout_reset(&s_adv_restart_callout,
+                                  ble_npl_time_ms_to_ticks32(300));
         } else {
             start_advertising();
         }
@@ -440,8 +446,9 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "BLE GAP Event: Advertising complete");
         // Restart advertising if we are not connected
         if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
-            if (s_adv_restart_timer) {
-                xTimerStart(s_adv_restart_timer, 0);
+            if (s_adv_callout_initialized) {
+                ble_npl_callout_reset(&s_adv_restart_callout,
+                                      ble_npl_time_ms_to_ticks32(300));
             } else {
                 start_advertising();
             }
@@ -496,9 +503,9 @@ static int ble_gap_event_handler(struct ble_gap_event *event, void *arg)
 static void ble_on_reset(int reason)
 {
     ESP_LOGW(TAG, "BLE Host reset: reason=%d", reason);
-    // Cancel any pending restart timer; ble_on_sync will restart advertising
-    if (s_adv_restart_timer) {
-        xTimerStop(s_adv_restart_timer, 0);
+    // Cancel any pending restart callout; ble_on_sync will restart advertising
+    if (s_adv_callout_initialized) {
+        ble_npl_callout_stop(&s_adv_restart_callout);
     }
 }
 
@@ -541,7 +548,8 @@ static void start_advertising(void)
     rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to set advertising fields: rc=%d", rc);
-        if (s_adv_restart_timer) xTimerStart(s_adv_restart_timer, 0);
+        if (s_adv_callout_initialized)
+            ble_npl_callout_reset(&s_adv_restart_callout, ble_npl_time_ms_to_ticks32(300));
         return;
     }
     
@@ -556,7 +564,8 @@ static void start_advertising(void)
     rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to set scan response: rc=%d", rc);
-        if (s_adv_restart_timer) xTimerStart(s_adv_restart_timer, 0);
+        if (s_adv_callout_initialized)
+            ble_npl_callout_reset(&s_adv_restart_callout, ble_npl_time_ms_to_ticks32(300));
         return;
     }
     
@@ -574,7 +583,8 @@ static void start_advertising(void)
                           &adv_params, ble_gap_event_handler, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to start advertising: rc=%d", rc);
-        if (s_adv_restart_timer) xTimerStart(s_adv_restart_timer, 0);
+        if (s_adv_callout_initialized)
+            ble_npl_callout_reset(&s_adv_restart_callout, ble_npl_time_ms_to_ticks32(300));
         return;
     }
     
@@ -734,14 +744,15 @@ cube32_result_t BleOta::initGattServer()
         return CUBE32_NOT_INITIALIZED;
     }
     
-    // Create a one-shot timer for deferred advertising restart after disconnect.
-    // The timer fires once after 300 ms and is re-armed on each disconnect event.
-    if (s_adv_restart_timer == NULL) {
-        s_adv_restart_timer = xTimerCreate("ble_adv_restart",
-            pdMS_TO_TICKS(300), pdFALSE, NULL, adv_restart_timer_cb);
-        if (s_adv_restart_timer == NULL) {
-            ESP_LOGW(TAG, "Failed to create adv restart timer — will use direct restart");
-        }
+    // Create a NimBLE NPL callout for deferred advertising restart after disconnect.
+    // The callout fires once after 300 ms and is re-armed on each disconnect event.
+    // It runs in the NimBLE host task context, which has adequate stack depth for
+    // NimBLE API calls — unlike the FreeRTOS Tmr Svc task (default 2 KB stack).
+    if (!s_adv_callout_initialized) {
+        ble_npl_callout_init(&s_adv_restart_callout,
+                             nimble_port_get_dflt_eventq(),
+                             adv_restart_callout_cb, NULL);
+        s_adv_callout_initialized = true;
     }
 
     // Start NimBLE host task

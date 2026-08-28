@@ -50,6 +50,7 @@
 #include <nvs_flash.h>
 
 #include "cube32.h"
+#include "utils/config_manager.h"
 #include "utils/hw_manifest.h"
 
 #include <string>
@@ -69,6 +70,36 @@ static const char *TAG = "hello_rtc_ntp";
 #define WIFI_CONNECTED_BIT      BIT0
 #define WIFI_FAIL_BIT           BIT1
 
+#if CONFIG_CUBE32_WIFI_SAE_PWE_HUNT_AND_PECK
+#define CUBE32_WIFI_SAE_MODE WPA3_SAE_PWE_HUNT_AND_PECK
+#elif CONFIG_CUBE32_WIFI_SAE_PWE_H2E
+#define CUBE32_WIFI_SAE_MODE WPA3_SAE_PWE_HASH_TO_ELEMENT
+#elif CONFIG_CUBE32_WIFI_SAE_PWE_BOTH
+#define CUBE32_WIFI_SAE_MODE WPA3_SAE_PWE_BOTH
+#else
+#define CUBE32_WIFI_SAE_MODE WPA3_SAE_PWE_BOTH
+#endif
+
+#if CONFIG_CUBE32_WIFI_AUTH_OPEN
+#define CUBE32_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_OPEN
+#elif CONFIG_CUBE32_WIFI_AUTH_WEP
+#define CUBE32_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WEP
+#elif CONFIG_CUBE32_WIFI_AUTH_WPA_PSK
+#define CUBE32_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA_PSK
+#elif CONFIG_CUBE32_WIFI_AUTH_WPA2_PSK
+#define CUBE32_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_PSK
+#elif CONFIG_CUBE32_WIFI_AUTH_WPA_WPA2_PSK
+#define CUBE32_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA_WPA2_PSK
+#elif CONFIG_CUBE32_WIFI_AUTH_WPA3_PSK
+#define CUBE32_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA3_PSK
+#elif CONFIG_CUBE32_WIFI_AUTH_WPA2_WPA3_PSK
+#define CUBE32_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_WPA3_PSK
+#elif CONFIG_CUBE32_WIFI_AUTH_WAPI_PSK
+#define CUBE32_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WAPI_PSK
+#else
+#define CUBE32_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_PSK
+#endif
+
 // ============================================================================
 // State Variables
 // ============================================================================
@@ -80,6 +111,7 @@ static int s_retry_num = 0;
 static bool s_wifi_connected = false;
 static bool s_ntp_synced = false;
 static char s_wifi_ip[32] = "N/A";
+static char s_wifi_ssid[sizeof(((wifi_config_t*)nullptr)->sta.ssid)] = "";
 static char s_last_sync_time[32] = "Never";
 static bool s_using_modem = false;
 
@@ -169,17 +201,31 @@ static esp_err_t wifi_init_sta(void) {
                                                         nullptr,
                                                         &instance_got_ip));
 
+    const cube32_cfg_t* runtime_cfg = cube32_cfg();
+    const bool has_nvs_wifi_credentials =
+        (runtime_cfg->nvs_found & CUBE32_CFG_NVS_WIFI_SSID) &&
+        (runtime_cfg->nvs_found & CUBE32_CFG_NVS_WIFI_PASS) &&
+        runtime_cfg->wifi_ssid[0] != '\0';
+    const char* wifi_ssid = has_nvs_wifi_credentials
+        ? runtime_cfg->wifi_ssid : CONFIG_CUBE32_WIFI_SSID;
+    const char* wifi_pass = has_nvs_wifi_credentials
+        ? runtime_cfg->wifi_pass : CONFIG_CUBE32_WIFI_PASSWORD;
+
     wifi_config_t wifi_config = {};
-    strncpy((char*)wifi_config.sta.ssid, CONFIG_CUBE32_WIFI_SSID, sizeof(wifi_config.sta.ssid) - 1);
-    strncpy((char*)wifi_config.sta.password, CONFIG_CUBE32_WIFI_PASSWORD, sizeof(wifi_config.sta.password) - 1);
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-    wifi_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+    strncpy((char*)wifi_config.sta.ssid, wifi_ssid, sizeof(wifi_config.sta.ssid) - 1);
+    strncpy((char*)wifi_config.sta.password, wifi_pass, sizeof(wifi_config.sta.password) - 1);
+    wifi_config.sta.threshold.authmode = CUBE32_WIFI_SCAN_AUTH_MODE_THRESHOLD;
+    wifi_config.sta.sae_pwe_h2e = CUBE32_WIFI_SAE_MODE;
+    strncpy(s_wifi_ssid, wifi_ssid, sizeof(s_wifi_ssid) - 1);
+    s_wifi_ssid[sizeof(s_wifi_ssid) - 1] = '\0';
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "WiFi STA initialized, connecting to %s...", CONFIG_CUBE32_WIFI_SSID);
+    ESP_LOGI(TAG, "WiFi credentials: %s, SSID: %s",
+             has_nvs_wifi_credentials ? "NVS" : "sdkconfig fallback", s_wifi_ssid);
+    ESP_LOGI(TAG, "WiFi STA initialized, connecting to %s...", s_wifi_ssid);
 
     // Wait for connection or failure
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
@@ -189,10 +235,10 @@ static esp_err_t wifi_init_sta(void) {
             pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
 
     if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "Successfully connected to SSID: %s", CONFIG_CUBE32_WIFI_SSID);
+        ESP_LOGI(TAG, "Successfully connected to SSID: %s", s_wifi_ssid);
         return ESP_OK;
     } else if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGE(TAG, "Failed to connect to SSID: %s", CONFIG_CUBE32_WIFI_SSID);
+        ESP_LOGE(TAG, "Failed to connect to SSID: %s", s_wifi_ssid);
         return ESP_FAIL;
     } else {
         ESP_LOGE(TAG, "WiFi connection timeout");

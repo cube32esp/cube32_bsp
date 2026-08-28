@@ -56,7 +56,9 @@ WAV format: 16-bit PCM, mono, 16 kHz, 5 seconds.
 
 The LVGL touchscreen UI has three sections:
 
-1. **Mode dropdown** — select No AEC / HW AEC / SW AEC before recording
+1. **Mode dropdown** — defaults to **SW AEC**. On the Dedicated Audio Module it
+  offers No AEC / HW AEC / SW AEC; on the Integrated Core+Audio Module it
+  offers only No AEC / SW AEC because ES8311 has no hardware reference input.
 2. **Record / Stop buttons + progress bar** — run the 5-second capture
 3. **Play buttons** (one per mode) + volume slider — audition each WAV on-device
 
@@ -110,5 +112,7 @@ idf.py build flash monitor
   acoustic reference.  The queue depth provides ~256 ms of buffering.
 - HW AEC uses the physical reference signal on ES7210 ch1, which captures the
   actual speaker output including PA and speaker non-linearities.
+- The volume slider setting is retained when the test reinitialises the codec
+  at 16 kHz, including when it is adjusted before pressing Test.
 - The playback task reinitialises the I2S controller at the WAV sample rate to
   guarantee the clock matches the recorded data.

@@ -9,6 +9,8 @@
 #ifndef CUBE32_CONFIG_H
 #define CUBE32_CONFIG_H
 
+#include <stddef.h>
+#include <stdint.h>
 #include <driver/gpio.h>
 #include <driver/i2c_types.h>
 #include <driver/spi_common.h>
@@ -59,23 +61,85 @@ extern "C" {
 #define CUBE32_LCD_RST_PIN        GPIO_NUM_NC
 #define CUBE32_LCD_BL_PIN         GPIO_NUM_NC
 
-/* LCD Resolution based on display board model from Kconfig */
-#if defined(CONFIG_CUBE32_DISPLAY_CUBE_TFT_TOUCH_154)
-#define CUBE32_LCD_H_RES          240
-#define CUBE32_LCD_V_RES          240
-#define CUBE32_LCD_DEFAULT_ROTATION  270     /* 1.54" default rotation */
-#elif defined(CONFIG_CUBE32_DISPLAY_CUBE_TFT_TOUCH_200)
-#define CUBE32_LCD_H_RES          240
-#define CUBE32_LCD_V_RES          320
-#define CUBE32_LCD_DEFAULT_ROTATION  0     /* 2.0" default rotation */
-#else
-/* Default resolution if no board model selected */
-#define CUBE32_LCD_H_RES          240
-#define CUBE32_LCD_V_RES          240
-#define CUBE32_LCD_DEFAULT_ROTATION  0
-#endif
+/* Inert fallback values used only as struct-literal placeholders in the
+ * driver default-config macros (CUBE32_ST7789_CONFIG_DEFAULT /
+ * CUBE32_TOUCH_CONFIG_DEFAULT). Real resolution/rotation is resolved at
+ * runtime from the display model table below and applied explicitly by
+ * the caller (see cube32.cpp) before begin() — these are never used when
+ * a known display model is detected. */
+#define CUBE32_LCD_H_RES_FALLBACK        240
+#define CUBE32_LCD_V_RES_FALLBACK        240
+#define CUBE32_LCD_ROTATION_FALLBACK     0
 
 #define CUBE32_LCD_PIXEL_CLK_HZ   (40 * 1000 * 1000)
+
+/* ============================================================================
+ * Display Model Registry — auto-detected from touch controller I2C address
+ *
+ * The display board model can no longer be selected via Kconfig. Instead,
+ * it is auto-detected at boot from the I2C address of the touch controller
+ * found on the shared I2C bus (see hw_manifest.cpp), and resolved to a
+ * model entry in the table below.
+ *
+ * To add support for a new display board:
+ *   1. Add a row below with its touch I2C address, resolution and rotation.
+ *   2. If it uses a touch IC not yet supported, add a new cube32_touch_ic_t
+ *      value and init routine in drivers/touch/touch.h / touch.cpp.
+ *   3. If it uses a display controller other than ST7789, add a new
+ *      cube32_display_ic_t value (drivers/display/st7789.h), a new display
+ *      driver (similar to drivers/display/st7796.cpp), set the row's
+ *      display_ic accordingly, and wire the dispatch in cube32.cpp /
+ *      lvgl_driver.cpp (see ST7796Display for the existing example).
+ * ============================================================================ */
+
+/** Sentinel model_id meaning "no known display model detected". */
+#define CUBE32_DISPLAY_MODEL_UNKNOWN_ID   0
+
+typedef struct {
+    uint8_t     model_id;          ///< Stable numeric ID, persisted to NVS for model-change detection
+    uint8_t     touch_i2c_addr;    ///< Touch controller I2C address used to auto-detect this model
+    const char* model_name;        ///< Human-readable model name (includes resolution)
+    const char* display_chip;      ///< Display controller chip name
+    const char* touch_chip;        ///< Touch controller chip name
+    uint8_t     touch_ic;          ///< cube32_touch_ic_t value (see drivers/touch/touch.h) for this touch chip
+    uint16_t    h_res;              ///< Horizontal resolution (pixels)
+    uint16_t    v_res;              ///< Vertical resolution (pixels)
+    uint16_t    default_rotation;   ///< Default rotation (0, 90, 180, 270)
+    uint8_t     display_ic;         ///< cube32_display_ic_t value (see drivers/display/st7789.h) for this display chip
+} cube32_display_model_info_t;
+
+/* touch_ic values below mirror cube32_touch_ic_t in drivers/touch/touch.h:
+ *   0 = CUBE32_TOUCH_IC_NONE, 1 = CUBE32_TOUCH_IC_CST816, 2 = CUBE32_TOUCH_IC_FT6336, 3 = CUBE32_TOUCH_IC_GT911
+ * display_ic values below mirror cube32_display_ic_t in drivers/display/st7789.h:
+ *   1 = CUBE32_DISPLAY_IC_ST7789, 2 = CUBE32_DISPLAY_IC_ST7796
+ * (kept as plain integers here to avoid a circular include with touch.h / st7789.h). */
+static const cube32_display_model_info_t CUBE32_DISPLAY_MODEL_TABLE[] = {
+    /* model_id, touch_i2c_addr, model_name,                        display_chip, touch_chip, touch_ic, h_res, v_res, default_rotation, display_ic */
+    { 1,         0x15,           "CUBE_TFT_TOUCH_154_240x240",      "ST7789",     "CST816S",  1,        240,   240,   270,              1 },
+    { 2,         0x38,           "CUBE_TFT_TOUCH_200_240x320",      "ST7789",     "FT6336",   2,        240,   320,   0,                1 },
+    { 3,         0x5D,           "CUBE_TFT_TOUCH_GT911_320x320",    "ST7796S",    "GT911",    3,        320,   320,   0,                2 },
+    { 3,         0x14,           "CUBE_TFT_TOUCH_GT911_320x320",    "ST7796S",    "GT911",    3,        320,   320,   0,                2 },
+    /* Add new rows here for additional display boards. */
+};
+
+#define CUBE32_DISPLAY_MODEL_COUNT \
+    (sizeof(CUBE32_DISPLAY_MODEL_TABLE) / sizeof(CUBE32_DISPLAY_MODEL_TABLE[0]))
+
+/**
+ * @brief Look up the display model entry matching a detected touch I2C address.
+ *
+ * @param touch_i2c_addr  I2C address detected on the bus (0 = not present).
+ * @return Pointer to the matching table entry, or NULL if unknown/not found.
+ */
+static inline const cube32_display_model_info_t* cube32_display_model_lookup(uint8_t touch_i2c_addr)
+{
+    for (size_t i = 0; i < CUBE32_DISPLAY_MODEL_COUNT; i++) {
+        if (CUBE32_DISPLAY_MODEL_TABLE[i].touch_i2c_addr == touch_i2c_addr) {
+            return &CUBE32_DISPLAY_MODEL_TABLE[i];
+        }
+    }
+    return NULL;
+}
 
 /* ============================================================================
  * Touch Configuration
@@ -102,12 +166,15 @@ extern "C" {
 #define CUBE32_AUDIO_CODEC_ES8311_ADDR  ES8311_CODEC_DEFAULT_ADDR
 #define CUBE32_AUDIO_CODEC_ES7210_ADDR  ES7210_CODEC_DEFAULT_ADDR
 
-// ADC Microphone Input Source — toggle manually during testing (Kconfig to follow).
-// To use ES8311 ADC: uncomment CUBE32_AUDIO_ADC_ES8311, comment out CUBE32_AUDIO_ADC_ES7210.
-// To use ES7210 ADC (default): uncomment CUBE32_AUDIO_ADC_ES7210, comment out CUBE32_AUDIO_ADC_ES8311.
-// NOTE: HW AEC is NOT available when CUBE32_AUDIO_ADC_ES8311 is selected.
-// #define CUBE32_AUDIO_ADC_ES8311         ///< ES8311 codec ADC path (no HW AEC)
- #define CUBE32_AUDIO_ADC_ES7210            ///< ES7210 dedicated 4-ch TDM ADC (default, HW AEC supported)
+// ADC Microphone Input Source — determined automatically at runtime from the detected
+// ES8311 I2C address during the hardware manifest scan (hw_manifest.cpp):
+//   ES8311 @ 0x18 → Dedicated Audio Module: ES8311 for DAC output, ES7210 for mic ADC input
+//   ES8311 @ 0x19 → Integrated CUBE32 Core+Audio: ES8311 for both DAC output and mic ADC input
+// No manual toggle required. CUBE32_AUDIO_ADC_ES8311 / CUBE32_AUDIO_ADC_ES7210 macros removed.
+
+// PA amplifier (NS4150B) control pin for the Integrated CUBE32 Core+Audio module.
+// The Dedicated Audio Module uses TCA9554 IO expander (IOX@0x20) instead.
+#define CUBE32_AUDIO_INTEGRATED_PA_PIN  GPIO_NUM_7
 
 #define CUBE32_AUDIO_IOX_ADDR       0x20
 
@@ -186,6 +253,13 @@ extern "C" {
 #define CUBE32_SD_CMD_PIN         GPIO_NUM_7
 #define CUBE32_SD_CLK_PIN         GPIO_NUM_15
 #define CUBE32_SD_D0_PIN          GPIO_NUM_4
+
+/* SPI SD (BASE module — for CUBE32 S3 Audio integrated variant, no on-board SDMMC).
+ * The SPI bus (SPI2_HOST) is shared with the TFT display; the SD card is a
+ * second device on that bus identified by its own CS pin (GPIO 5).          */
+#define CUBE32_SD_SPI_HOST        SPI2_HOST       ///< Shared with TFT
+#define CUBE32_SD_SPI_CS_PIN      GPIO_NUM_15       ///< Chip-select for SPI SD
+#define CUBE32_SD_SPI_FREQ_KHZ    20000            ///< 20 MHz — safe default
 
 /* ============================================================================
  * PMU Configuration (if applicable)

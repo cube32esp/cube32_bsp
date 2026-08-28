@@ -35,8 +35,11 @@ extern "C" {
 #define CUBE32_I2C_ADDR_BM8563          0x51    ///< RTC
 #define CUBE32_I2C_ADDR_CST816S         0x15    ///< Touch (capacitive)
 #define CUBE32_I2C_ADDR_FT6336          0x38    ///< Touch (capacitive, alt IC)
-#define CUBE32_I2C_ADDR_ES8311          0x18    ///< Audio DAC
-#define CUBE32_I2C_ADDR_ES7210          0x40    ///< Audio ADC (microphone)
+#define CUBE32_I2C_ADDR_GT911           0x5D    ///< Touch (capacitive, alt IC) — primary strap address
+#define CUBE32_I2C_ADDR_GT911_BACKUP    0x14    ///< Touch (capacitive, alt IC) — INT-strap backup address
+#define CUBE32_I2C_ADDR_ES8311          0x18    ///< Audio DAC — dedicated Audio Module (ES8311 + ES7210)
+#define CUBE32_I2C_ADDR_ES8311_INTEGRATED 0x19   ///< Audio DAC — integrated CUBE32 Core+Audio (ES8311 DAC+ADC, no ES7210)
+#define CUBE32_I2C_ADDR_ES7210          0x40    ///< Audio ADC (microphone) — dedicated Audio Module only
 #define CUBE32_I2C_ADDR_TCA9554_AUDIO   0x20    ///< Audio module IO expander
 #define CUBE32_I2C_ADDR_TCA9554_MODEM   0x22    ///< Modem module IO expander
 #define CUBE32_I2C_ADDR_LSM6DSO         0x6A    ///< 6-axis IMU (accel + gyro)
@@ -70,6 +73,32 @@ typedef enum {
 
     CUBE32_PROFILE_COUNT,           ///< Number of defined profiles (sentinel)
 } cube32_board_profile_t;
+
+/* ============================================================================
+ * Core Module Models
+ *
+ * Identifies the physical core module installed, detected at boot from the
+ * I2C fingerprint.  This drives SD card interface selection (SDMMC vs SPI)
+ * and any other per-module driver differences.  Future core variants add
+ * a new enum value here — no new boolean fields needed.
+ * ============================================================================ */
+
+typedef enum {
+    /**
+     * ESP32-S3 Core module (default).
+     * No on-board audio. SD card via SDMMC.
+     */
+    CUBE32_CORE_MODULE_S3 = 0,
+
+    /**
+     * Integrated CUBE32 Core+Audio Module.
+     * ES8311 @ 0x19 (DAC+ADC). SD card via SPI (shared SPI2, CS=GPIO15).
+     */
+    CUBE32_CORE_MODULE_S3_AUDIO = 1,
+
+    /* Add future core module models here */
+
+} cube32_core_module_t;
 
 /* ============================================================================
  * Module presence flags (detected at boot via probing)
@@ -118,10 +147,22 @@ typedef struct {
     uint8_t     touch_ic;                   ///< Detected touch IC type (cube32_touch_ic_t from touch.h)
     uint8_t     touch_i2c_addr;             ///< Detected touch I2C address (0 = absent)
 
+    /* ---- Display Model (resolved from touch_i2c_addr, see cube32_config.h) */
+    uint8_t     display_model_id;           ///< CUBE32_DISPLAY_MODEL_UNKNOWN_ID (0) if no known model detected
+    const char* display_model_name;         ///< Human-readable model name, or "None" if unknown
+    uint16_t    display_h_res;              ///< Resolved horizontal resolution (0 if unknown)
+    uint16_t    display_v_res;              ///< Resolved vertical resolution (0 if unknown)
+    uint16_t    display_default_rotation;   ///< Resolved default rotation (0 if unknown)
+    uint8_t     display_ic;                 ///< Display controller IC (cube32_display_ic_t from drivers/display/st7789.h); defaults to ST7789 (1) if no model matched
+
+    /* ---- Detected Core Module Model ------------------------------------- */
+    cube32_core_module_t core_module;       ///< Detected core module model. Set at scan time from I2C fingerprint. CUBE32_CORE_MODULE_S3 is the safe default.
+
     /* ---- Module Detection (build-gated, I2C fingerprint) ----------------- */
-    bool        audio_module_present;       ///< Audio codec pair detected (ES8311+ES7210)
-    bool        audio_dac_present;          ///< ES8311 found at 0x18
-    bool        audio_adc_present;          ///< ES7210 found at 0x40
+    bool        audio_module_present;       ///< Audio system present: ES8311@0x18+ES7210, or ES8311@0x19 (integrated)
+    bool        audio_dac_present;          ///< ES8311 found (at 0x18 or 0x19)
+    bool        audio_adc_present;          ///< Mic ADC available: ES7210@0x40 (dedicated) or ES8311@0x19 (integrated)
+    uint8_t     audio_es8311_addr;          ///< Detected ES8311 I2C address (0x18=dedicated module, 0x19=integrated, 0=absent)
 
     bool        modem_module_present;       ///< TCA9554 found at 0x22 → modem module installed
     bool        camera_present;             ///< Camera probed successfully
@@ -230,6 +271,11 @@ const char* cube32_driver_name(cube32_driver_index_t index);
  * @brief Get a human-readable name for a board profile.
  */
 const char* cube32_profile_name(cube32_board_profile_t profile);
+
+/**
+ * @brief Get a human-readable name for a core module model.
+ */
+const char* cube32_core_module_name(cube32_core_module_t module);
 
 #ifdef __cplusplus
 }

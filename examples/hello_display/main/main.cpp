@@ -2,12 +2,14 @@
  * @file main.cpp
  * @brief CUBE32 Hello Display Example
  * 
- * This example demonstrates basic ST7789 TFT display initialization and
- * drawing operations on the CUBE32 board.
+ * This example demonstrates basic TFT display initialization and
+ * drawing operations on the CUBE32 board. It supports both display
+ * drivers auto-detected by the hardware manifest: ST7789 (240x240 /
+ * 240x320 boards) and ST7796S (320x320 GT911-touch board).
  * 
  * Features demonstrated:
  * - SPI bus initialization
- * - ST7789 display initialization
+ * - Display initialization (ST7789 or ST7796S, auto-detected)
  * - Basic drawing operations (fill, rectangles, pixels)
  * - Color patterns and animations
  */
@@ -21,13 +23,15 @@
 #include <esp_timer.h>
 
 #include "cube32.h"
+#include "utils/hw_manifest.h"
 
 static const char *TAG = "hello_display";
 
 /**
  * @brief Draw a simple test pattern
  */
-void draw_test_pattern(cube32::ST7789Display& display) {
+template<typename DisplayT>
+void draw_test_pattern(DisplayT& display) {
     uint16_t width = display.getWidth();
     uint16_t height = display.getHeight();
     
@@ -59,7 +63,8 @@ void draw_test_pattern(cube32::ST7789Display& display) {
 /**
  * @brief Draw a bouncing rectangle animation
  */
-void draw_bouncing_rect(cube32::ST7789Display& display, int frame) {
+template<typename DisplayT>
+void draw_bouncing_rect(DisplayT& display, int frame) {
     uint16_t width = display.getWidth();
     uint16_t height = display.getHeight();
     
@@ -88,7 +93,8 @@ void draw_bouncing_rect(cube32::ST7789Display& display, int frame) {
 /**
  * @brief Draw CUBE32 text/logo pattern
  */
-void draw_cube32_logo(cube32::ST7789Display& display) {
+template<typename DisplayT>
+void draw_cube32_logo(DisplayT& display) {
     uint16_t width = display.getWidth();
     uint16_t height = display.getHeight();
     uint16_t cx = width / 2;
@@ -125,7 +131,8 @@ void draw_cube32_logo(cube32::ST7789Display& display) {
 /**
  * @brief Draw a gradient pattern
  */
-void draw_gradient(cube32::ST7789Display& display) {
+template<typename DisplayT>
+void draw_gradient(DisplayT& display) {
     uint16_t width = display.getWidth();
     uint16_t height = display.getHeight();
     
@@ -142,26 +149,15 @@ void draw_gradient(cube32::ST7789Display& display) {
     ESP_LOGI(TAG, "Gradient drawn");
 }
 
-extern "C" void app_main(void)
-{
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "CUBE32 Hello Display Example");
-    ESP_LOGI(TAG, "========================================");
-
-    /* Initialize CUBE32 board (includes SPI bus and display) */
-    esp_err_t ret = cube32_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize CUBE32 board!");
-        return;
-    }
-
-    /* Get display instance */
-    auto& display = cube32::ST7789Display::instance();
-    if (!display.isInitialized()) {
-        ESP_LOGE(TAG, "Display not initialized - check CONFIG_CUBE32_DISPLAY_ENABLED");
-        return;
-    }
-    
+/**
+ * @brief Run the full demo sequence against whichever display driver is active
+ *
+ * Templatized so the same demo logic runs against cube32::ST7789Display or
+ * cube32::ST7796Display (both expose identical getWidth/getHeight/clear/
+ * fillRect signatures — see st7796.h file header).
+ */
+template<typename DisplayT>
+void run_demo(DisplayT& display) {
     ESP_LOGI(TAG, "Display ready: %dx%d", display.getWidth(), display.getHeight());
 
     /* Demo sequence */
@@ -230,5 +226,38 @@ extern "C" void app_main(void)
         } else {
             vTaskDelay(pdMS_TO_TICKS(100));
         }
+    }
+}
+
+extern "C" void app_main(void)
+{
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "CUBE32 Hello Display Example");
+    ESP_LOGI(TAG, "========================================");
+
+    /* Initialize CUBE32 board (includes SPI bus and display) */
+    esp_err_t ret = cube32_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize CUBE32 board!");
+        return;
+    }
+
+    /* Get display instance — dispatch based on the auto-detected display
+     * model (see hw_manifest.h / cube32_config.h CUBE32_DISPLAY_MODEL_TABLE) */
+    cube32_hw_manifest_t* hw = cube32_hw_manifest();
+    if (hw->display_ic == CUBE32_DISPLAY_IC_ST7796) {
+        auto& display = cube32::ST7796Display::instance();
+        if (!display.isInitialized()) {
+            ESP_LOGE(TAG, "Display not initialized - check CONFIG_CUBE32_DISPLAY_ENABLED");
+            return;
+        }
+        run_demo(display);
+    } else {
+        auto& display = cube32::ST7789Display::instance();
+        if (!display.isInitialized()) {
+            ESP_LOGE(TAG, "Display not initialized - check CONFIG_CUBE32_DISPLAY_ENABLED");
+            return;
+        }
+        run_demo(display);
     }
 }

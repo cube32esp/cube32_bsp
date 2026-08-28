@@ -42,12 +42,8 @@ static const char *TAG = "hello_world";
 // ============================================================================
 // 3D cube geometry — unit cube vertices and edges
 // ============================================================================
-#define CANVAS_W    240            // full-screen canvas — redrawn every 33ms, prevents stale pixels
-#define CANVAS_H    240
-#define CANVAS_CX   120            // perspective projection centre X
-#define CANVAS_CY   120            // perspective projection centre Y
 #define FOV_DIST    3.0f           // perspective distance
-#define CUBE_SCALE  88.0f          // pixels per unit at depth 0
+#define CUBE_SCALE_240  88.0f      // pixels per unit at depth 0 on a 240px display
 
 // 8 vertices: v0–v3 back face (z=−0.5), v4–v7 front face (z=+0.5)
 static const float k_verts[8][3] = {
@@ -132,6 +128,11 @@ static lv_obj_t      *s_bat_lbl       = nullptr;  // live-updated battery label
 static lv_obj_t      *s_status_screen = nullptr;
 static lv_obj_t      *s_canvas        = nullptr;
 static lv_draw_buf_t *s_draw_buf      = nullptr;
+static uint16_t       s_canvas_w      = 240;
+static uint16_t       s_canvas_h      = 240;
+static int32_t        s_canvas_cx     = 120;
+static int32_t        s_canvas_cy     = 120;
+static float          s_cube_scale    = CUBE_SCALE_240;
 
 // ============================================================================
 // 3D math: rotate vertex by yaw (Y axis) then pitch (X axis)
@@ -163,8 +164,8 @@ static void project_vertex(const float v[3], int32_t &sx, int32_t &sy)
     float denom = FOV_DIST - v[2];
     if (denom < 0.1f) denom = 0.1f;   // guard: vertex at or behind camera
     const float w = FOV_DIST / denom;
-    sx = (int32_t)( v[0] * w * CUBE_SCALE) + CANVAS_CX;
-    sy = (int32_t)(-v[1] * w * CUBE_SCALE) + CANVAS_CY;   // invert Y for screen
+    sx = (int32_t)( v[0] * w * s_cube_scale) + s_canvas_cx;
+    sy = (int32_t)(-v[1] * w * s_cube_scale) + s_canvas_cy;   // invert Y for screen
 }
 
 // ============================================================================
@@ -345,9 +346,23 @@ static void create_splash_screen(void)
     lv_obj_set_style_border_width(s_splash_screen, 0, 0);
     lv_obj_clear_flag(s_splash_screen, LV_OBJ_FLAG_SCROLLABLE);
 
-    // 240×240 canvas — covers the ENTIRE screen, filled with BG_COLOR every frame.
-    // Created FIRST so title/hint labels (created after) have higher z-order and render on top.
-    s_draw_buf = lv_draw_buf_create(CANVAS_W, CANVAS_H,
+    // Match the active display, rather than assuming the original 240x240
+    // board. The canvas is the projection plane, so these values also define
+    // the cube's visual centre. On the ST7796 it becomes 320x320, centred at
+    // (160, 160), while the existing 240x240 layout remains unchanged.
+    lv_display_t *display = lv_display_get_default();
+    if (display) {
+        s_canvas_w = lv_display_get_horizontal_resolution(display);
+        s_canvas_h = lv_display_get_vertical_resolution(display);
+    }
+    s_canvas_cx = s_canvas_w / 2;
+    s_canvas_cy = s_canvas_h / 2;
+    const uint16_t shortest_side = s_canvas_w < s_canvas_h ? s_canvas_w : s_canvas_h;
+    s_cube_scale = CUBE_SCALE_240 * (float)shortest_side / 240.0f;
+
+    // Created FIRST so title/hint labels (created after) have higher z-order
+    // and render on top. It is filled with BG_COLOR every animation frame.
+    s_draw_buf = lv_draw_buf_create(s_canvas_w, s_canvas_h,
                                     LV_COLOR_FORMAT_RGB565, 0);
     if (s_draw_buf) {
         s_canvas = lv_canvas_create(s_splash_screen);
@@ -355,7 +370,8 @@ static void create_splash_screen(void)
         lv_obj_set_pos(s_canvas, 0, 0);
         lv_canvas_fill_bg(s_canvas, lv_color_hex(BG_COLOR), LV_OPA_COVER);
     } else {
-        ESP_LOGE(TAG, "Canvas alloc failed (%d bytes)", CANVAS_W * CANVAS_H * 2);
+        ESP_LOGE(TAG, "Canvas alloc failed (%u bytes)",
+             (unsigned int)s_canvas_w * s_canvas_h * 2);
     }
 
     // "CUBE32" title — created AFTER canvas so it renders on top

@@ -11,6 +11,7 @@
 #include "utils/i2c_bus.h"
 #include "utils/config_manager.h"
 #include "drivers/touch/touch.h"
+#include "drivers/display/st7789.h"
 #include "cube32_config.h"
 
 #include <cstring>
@@ -41,6 +42,15 @@ const char* cube32_profile_name(cube32_board_profile_t profile)
         case CUBE32_PROFILE_CORE_V1:        return "Core V1 (Full)";
         case CUBE32_PROFILE_CORE_AUDIO_V1:  return "Core Audio V1";
         default:                            return "Unknown";
+    }
+}
+
+const char* cube32_core_module_name(cube32_core_module_t module)
+{
+    switch (module) {
+        case CUBE32_CORE_MODULE_S3:       return "S3 Core";
+        case CUBE32_CORE_MODULE_S3_AUDIO: return "S3 Audio 2-in-1";
+        default:                          return "Unknown";
     }
 }
 
@@ -153,26 +163,92 @@ cube32_result_t cube32_hw_manifest_scan(cube32_hw_manifest_t* m)
         m->touch_present  = true;
         m->touch_ic       = CUBE32_TOUCH_IC_FT6336;
         m->touch_i2c_addr = CUBE32_I2C_ADDR_FT6336;
+    } else if (found(CUBE32_I2C_ADDR_GT911)) {
+        m->touch_present  = true;
+        m->touch_ic       = CUBE32_TOUCH_IC_GT911;
+        m->touch_i2c_addr = CUBE32_I2C_ADDR_GT911;
+    } else if (found(CUBE32_I2C_ADDR_GT911_BACKUP)) {
+        m->touch_present  = true;
+        m->touch_ic       = CUBE32_TOUCH_IC_GT911;
+        m->touch_i2c_addr = CUBE32_I2C_ADDR_GT911_BACKUP;
     }
 
-    /* Display — we can't probe SPI here. Mark as unknown;
-     * the display driver's begin() will set this later. */
+    /* Display board model — auto-detected from the touch controller's I2C
+     * address (the display itself is on SPI and can't be probed here). */
+    const cube32_display_model_info_t* model = cube32_display_model_lookup(m->touch_i2c_addr);
+    if (model) {
+        m->display_model_id         = model->model_id;
+        m->display_model_name       = model->model_name;
+        m->display_h_res            = model->h_res;
+        m->display_v_res            = model->v_res;
+        m->display_default_rotation = model->default_rotation;
+        m->display_ic               = model->display_ic;
+    } else {
+        m->display_model_id         = CUBE32_DISPLAY_MODEL_UNKNOWN_ID;
+        m->display_model_name       = "None";
+        m->display_h_res            = 0;
+        m->display_v_res            = 0;
+        m->display_default_rotation = 0;
+        m->display_ic               = CUBE32_DISPLAY_IC_ST7789;
+        if (m->touch_i2c_addr != 0) {
+            ESP_LOGW(TAG, "Unrecognized touch I2C address 0x%02X — no display model matched",
+                     m->touch_i2c_addr);
+        }
+    }
+
+    /* Display presence mirrors whether a known model was detected — the
+     * actual driver begin() call still confirms it initialised correctly. */
     m->display_present = false;
 
     /* ------------------------------------------------------------------
      * 5. Module Detection
      * ------------------------------------------------------------------ */
 
-    /* Audio module: both DAC + ADC must be present */
-    m->audio_dac_present = found(CUBE32_I2C_ADDR_ES8311);
-#ifdef CUBE32_AUDIO_ADC_ES8311
-    // ES8311 handles both DAC and ADC — ES7210 is absent by design
-    m->audio_adc_present    = m->audio_dac_present;  // same chip
-    m->audio_module_present = m->audio_dac_present;
-#else
-    m->audio_adc_present    = found(CUBE32_I2C_ADDR_ES7210);
-    m->audio_module_present = m->audio_dac_present && m->audio_adc_present;
-#endif
+    /* Core module model: resolved unconditionally from the I2C fingerprint,
+     * independently of which audio module takes priority for audio init.
+     *   - ES8311 @ 0x19 detected  → Integrated CUBE32 Core+Audio Module
+     *   - Otherwise               → ESP32-S3 Core module (default)
+     * This field drives SD card interface selection (SDMMC vs SPI) and any
+     * future per-model driver differences.
+     */
+    m->core_module = found(CUBE32_I2C_ADDR_ES8311_INTEGRATED)
+                     ? CUBE32_CORE_MODULE_S3_AUDIO
+                     : CUBE32_CORE_MODULE_S3;
+    ESP_LOGI(TAG, "Core module: %s", cube32_core_module_name(m->core_module));
+
+    /* Audio module: detect ES8311 at 0x18 (dedicated module) or 0x19 (integrated module).
+     *
+     *   0x18 — Dedicated Audio Module: ES8311 (DAC) + ES7210 (ADC).
+     *           audio_module_present requires both ES8311 and ES7210 to be present.
+     *
+     *   0x19 — Integrated CUBE32 Core+Audio: ES8311 acts as both DAC and ADC.
+     *           audio_module_present requires only ES8311 (no ES7210 fitted).
+     *
+     *   Both present — Dedicated Audio Module takes audio priority; the
+     *           core_module field (S3_AUDIO) still routes SD to SPI.
+     */
+    if (found(CUBE32_I2C_ADDR_ES8311)) {
+        /* Dedicated Audio Module */
+        m->audio_dac_present  = true;
+        m->audio_es8311_addr  = CUBE32_I2C_ADDR_ES8311;
+        m->audio_adc_present  = found(CUBE32_I2C_ADDR_ES7210);
+        m->audio_module_present = m->audio_dac_present && m->audio_adc_present;
+    } else if (found(CUBE32_I2C_ADDR_ES8311_INTEGRATED)) {
+        /* Integrated CUBE32 Core+Audio — ES8311 handles both DAC and ADC */
+        m->audio_dac_present    = true;
+        m->audio_es8311_addr    = CUBE32_I2C_ADDR_ES8311_INTEGRATED;
+        m->audio_adc_present    = true;   // ES8311 ADC path
+        m->audio_module_present = true;   // ES8311 alone is sufficient
+    }
+    /* else: all audio flags remain false (memset to 0 at start of scan) */
+
+    /* Warn when both modules are simultaneously detected */
+    if (m->core_module == CUBE32_CORE_MODULE_S3_AUDIO &&
+        m->audio_es8311_addr == CUBE32_I2C_ADDR_ES8311) {
+        ESP_LOGW(TAG, "Both Integrated Core+Audio (0x19) and Dedicated Audio Module (0x18) "
+                      "detected. Audio: Dedicated Module (ES8311@0x18 + ES7210). "
+                      "SD: SPI via Integrated Module.");
+    }
 
     /* Modem module: TCA9554 at 0x22 */
     m->modem_module_present = found(CUBE32_I2C_ADDR_TCA9554_MODEM);
@@ -281,24 +357,13 @@ cube32_result_t cube32_hw_manifest_scan(cube32_hw_manifest_t* m)
  * Print helpers
  * ============================================================================ */
 
-/** Returns the display board model string from the Kconfig selection. */
-static const char* display_model_str(void)
-{
-#if defined(CONFIG_CUBE32_DISPLAY_CUBE_TFT_TOUCH_154)
-    return "CUBE_TFT_TOUCH_154 (240x240)";
-#elif defined(CONFIG_CUBE32_DISPLAY_CUBE_TFT_TOUCH_200)
-    return "CUBE_TFT_TOUCH_200 (240x320)";
-#else
-    return "Unknown";
-#endif
-}
-
 /** Returns the touch IC chip name from the detected IC type. */
 static const char* touch_ic_name(uint8_t ic)
 {
     switch ((cube32_touch_ic_t)ic) {
         case CUBE32_TOUCH_IC_CST816:  return "CST816S";
         case CUBE32_TOUCH_IC_FT6336:  return "FT6336";
+        case CUBE32_TOUCH_IC_GT911:   return "GT911";
         default:                       return "Unknown";
     }
 }
@@ -316,6 +381,7 @@ void cube32_hw_manifest_print(const cube32_hw_manifest_t* m)
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "Board   : %s", CONFIG_CUBE32_BOARD_NAME);
     ESP_LOGI(TAG, "Profile : %s", cube32_profile_name(m->profile));
+    ESP_LOGI(TAG, "Core    : %s", cube32_core_module_name(m->core_module));
     ESP_LOGI(TAG, "I2C devs: %u", m->i2c_device_count);
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %s", "Component", "Built", "Present", "Active", "Info");
     ESP_LOGI(TAG, "---------- | ----- | ------- | ------ | ----");
@@ -324,21 +390,21 @@ void cube32_hw_manifest_print(const cube32_hw_manifest_t* m)
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | BM8563 @ 0x%02X", "RTC",
              m->rtc_built ? "YES" : "no", m->rtc_present ? "YES" : "no", "  --  ", m->rtc_i2c_addr);
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %s", "Display",
-             m->display_built ? "YES" : "no", m->display_present ? "YES" : "pend", "  --  ", display_model_str());
+             m->display_built ? "YES" : "no", m->display_present ? "YES" : "pend", "  --  ", m->display_model_name);
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %s @ 0x%02X", "Touch",
              m->touch_built ? "YES" : "no", m->touch_present ? "YES" : "no", "  --  ",
              touch_ic_name(m->touch_ic), m->touch_i2c_addr);
-#ifdef CUBE32_AUDIO_ADC_ES8311
-    ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | ES8311@0x%02X (DAC+ADC)  IOX@0x%02X", "Audio",
-             m->audio_built ? "YES" : "no", m->audio_module_present ? "YES" : "no",
-             m->audio_active ? "YES" : "no",
-             CUBE32_I2C_ADDR_ES8311, CUBE32_I2C_ADDR_TCA9554_AUDIO);
-#else
-    ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | ES8311@0x%02X  ES7210@0x%02X  IOX@0x%02X", "Audio",
-             m->audio_built ? "YES" : "no", m->audio_module_present ? "YES" : "no",
-             m->audio_active ? "YES" : "no",
-             CUBE32_I2C_ADDR_ES8311, CUBE32_I2C_ADDR_ES7210, CUBE32_I2C_ADDR_TCA9554_AUDIO);
-#endif
+    if (m->audio_es8311_addr == CUBE32_I2C_ADDR_ES8311_INTEGRATED) {
+        ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | ES8311@0x%02X (Integrated DAC+ADC)  PA@GPIO%d", "Audio",
+                 m->audio_built ? "YES" : "no", m->audio_module_present ? "YES" : "no",
+                 m->audio_active ? "YES" : "no",
+                 m->audio_es8311_addr, (int)CUBE32_AUDIO_INTEGRATED_PA_PIN);
+    } else {
+        ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | ES8311@0x%02X  ES7210@0x%02X  IOX@0x%02X", "Audio",
+                 m->audio_built ? "YES" : "no", m->audio_module_present ? "YES" : "no",
+                 m->audio_active ? "YES" : "no",
+                 CUBE32_I2C_ADDR_ES8311, CUBE32_I2C_ADDR_ES7210, CUBE32_I2C_ADDR_TCA9554_AUDIO);
+    }
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | IOX@0x%02X", "Modem",
              m->modem_built ? "YES" : "no", m->modem_module_present ? "YES" : "no",
              m->modem_active ? "YES" : "no", CUBE32_I2C_ADDR_TCA9554_MODEM);
@@ -346,9 +412,15 @@ void cube32_hw_manifest_print(const cube32_hw_manifest_t* m)
              m->camera_built ? "YES" : "no", m->camera_present ? "YES" : "pend",
              m->camera_active ? "YES" : "no",
              m->camera_sensor_name[0] ? m->camera_sensor_name : "pend");
-    ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s |", "SD Card",
-             m->sdcard_built ? "YES" : "no", m->sdcard_present ? "YES" : "pend",
-             m->sdcard_active ? "YES" : "no");
+    if (m->core_module == CUBE32_CORE_MODULE_S3_AUDIO) {
+        ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | SPI (CS=GPIO%d)", "SD Card",
+                 m->sdcard_built ? "YES" : "no", m->sdcard_present ? "YES" : "pend",
+                 m->sdcard_active ? "YES" : "no", (int)CUBE32_SD_SPI_CS_PIN);
+    } else {
+        ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | SDMMC", "SD Card",
+                 m->sdcard_built ? "YES" : "no", m->sdcard_present ? "YES" : "pend",
+                 m->sdcard_active ? "YES" : "no");
+    }
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s |", "BLE OTA",
              m->ble_ota_built ? "YES" : "no", "  --  ",
              m->ble_ota_active ? "YES" : "no");
@@ -425,6 +497,7 @@ void cube32_hw_manifest_print_init_status(const cube32_hw_manifest_t* m)
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "Board   : %s", CONFIG_CUBE32_BOARD_NAME);
     ESP_LOGI(TAG, "Profile : %s", cube32_profile_name(m->profile));
+    ESP_LOGI(TAG, "Core    : %s", cube32_core_module_name(m->core_module));
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s | %s",
              "Component", "Built", "Present", "Active", "Init", "Info");
     ESP_LOGI(TAG, "---------- | ----- | ------- | ------ | ---- | ----");
@@ -440,7 +513,7 @@ void cube32_hw_manifest_print_init_status(const cube32_hw_manifest_t* m)
              "  --  ", INIT_STR(CUBE32_DRV_RTC), m->rtc_i2c_addr);
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s | %s", "Display",
              m->display_built ? "YES" : "no", m->display_present ? "YES" : "no",
-             "  --  ", INIT_STR(CUBE32_DRV_DISPLAY), display_model_str());
+             "  --  ", INIT_STR(CUBE32_DRV_DISPLAY), m->display_model_name);
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s |", "LVGL",
              m->lvgl_built ? "YES" : "no", "  --  ",
              "  --  ", INIT_STR(CUBE32_DRV_LVGL));
@@ -448,17 +521,17 @@ void cube32_hw_manifest_print_init_status(const cube32_hw_manifest_t* m)
              m->touch_built ? "YES" : "no", m->touch_present ? "YES" : "no",
              "  --  ", INIT_STR(CUBE32_DRV_TOUCH),
              touch_ic_name(m->touch_ic), m->touch_i2c_addr);
-#ifdef CUBE32_AUDIO_ADC_ES8311
-    ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s | ES8311@0x%02X (DAC+ADC)  IOX@0x%02X", "Audio",
-             m->audio_built ? "YES" : "no", m->audio_module_present ? "YES" : "no",
-             m->audio_active ? "YES" : "no", INIT_STR(CUBE32_DRV_AUDIO),
-             CUBE32_I2C_ADDR_ES8311, CUBE32_I2C_ADDR_TCA9554_AUDIO);
-#else
-    ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s | ES8311@0x%02X  ES7210@0x%02X  IOX@0x%02X", "Audio",
-             m->audio_built ? "YES" : "no", m->audio_module_present ? "YES" : "no",
-             m->audio_active ? "YES" : "no", INIT_STR(CUBE32_DRV_AUDIO),
-             CUBE32_I2C_ADDR_ES8311, CUBE32_I2C_ADDR_ES7210, CUBE32_I2C_ADDR_TCA9554_AUDIO);
-#endif
+    if (m->audio_es8311_addr == CUBE32_I2C_ADDR_ES8311_INTEGRATED) {
+        ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s | ES8311@0x%02X (Integrated DAC+ADC)  PA@GPIO%d", "Audio",
+                 m->audio_built ? "YES" : "no", m->audio_module_present ? "YES" : "no",
+                 m->audio_active ? "YES" : "no", INIT_STR(CUBE32_DRV_AUDIO),
+                 m->audio_es8311_addr, (int)CUBE32_AUDIO_INTEGRATED_PA_PIN);
+    } else {
+        ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s | ES8311@0x%02X  ES7210@0x%02X  IOX@0x%02X", "Audio",
+                 m->audio_built ? "YES" : "no", m->audio_module_present ? "YES" : "no",
+                 m->audio_active ? "YES" : "no", INIT_STR(CUBE32_DRV_AUDIO),
+                 CUBE32_I2C_ADDR_ES8311, CUBE32_I2C_ADDR_ES7210, CUBE32_I2C_ADDR_TCA9554_AUDIO);
+    }
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s | IOX@0x%02X", "Modem",
              m->modem_built ? "YES" : "no", m->modem_module_present ? "YES" : "no",
              m->modem_active ? "YES" : "no", INIT_STR(CUBE32_DRV_MODEM),
@@ -467,9 +540,16 @@ void cube32_hw_manifest_print_init_status(const cube32_hw_manifest_t* m)
              m->camera_built ? "YES" : "no", m->camera_present ? "YES" : "no",
              m->camera_active ? "YES" : "no", INIT_STR(CUBE32_DRV_CAMERA),
              m->camera_sensor_name[0] ? m->camera_sensor_name : "N/A");
-    ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s |", "SD Card",
-             m->sdcard_built ? "YES" : "no", m->sdcard_present ? "YES" : "no",
-             m->sdcard_active ? "YES" : "no", INIT_STR(CUBE32_DRV_SDCARD));
+    if (m->core_module == CUBE32_CORE_MODULE_S3_AUDIO) {
+        ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s | SPI (CS=GPIO%d)", "SD Card",
+                 m->sdcard_built ? "YES" : "no", m->sdcard_present ? "YES" : "no",
+                 m->sdcard_active ? "YES" : "no", INIT_STR(CUBE32_DRV_SDCARD),
+                 (int)CUBE32_SD_SPI_CS_PIN);
+    } else {
+        ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s | SDMMC", "SD Card",
+                 m->sdcard_built ? "YES" : "no", m->sdcard_present ? "YES" : "no",
+                 m->sdcard_active ? "YES" : "no", INIT_STR(CUBE32_DRV_SDCARD));
+    }
     ESP_LOGI(TAG, "%-10s | %-5s | %-7s | %-6s | %-4s |", "BLE OTA",
              m->ble_ota_built ? "YES" : "no", "  --  ",
              m->ble_ota_active ? "YES" : "no", INIT_STR(CUBE32_DRV_BLE_OTA));

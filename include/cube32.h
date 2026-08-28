@@ -21,6 +21,7 @@
 #ifdef __cplusplus
 #include "drivers/pmu/axp2101.h"
 #include "drivers/display/st7789.h"
+#include "drivers/display/st7796.h"
 #include "drivers/touch/touch.h"
 #ifdef CONFIG_CUBE32_CAMERA_ENABLED
 #include "drivers/camera/camera.h"

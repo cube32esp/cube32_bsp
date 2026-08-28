@@ -41,6 +41,10 @@
 #include "esp_aec.h"
 #include "esp_afe_aec.h"
 
+// SPIFFS / POSIX dir (built-in flash recording support)
+#include "esp_spiffs.h"
+#include <dirent.h>
+
 static const char *TAG = "hello_aec_test";
 
 // ============================================================================
@@ -52,8 +56,18 @@ static const char *TAG = "hello_aec_test";
 #define TONE_FREQ_HZ             1000    // Test tone frequency
 #define TONE_AMPLITUDE           22000   // ~0.67 * INT16_MAX
 #define AEC_FILTER_LENGTH        4       // Recommended for ESP32-S3
-#define INITIAL_VOLUME           80
+#define INITIAL_VOLUME           50
 #define REF_QUEUE_DEPTH          8       // SW AEC reference queue depth
+
+// Recording destination:
+//   0 = SD card (requires CONFIG_CUBE32_SDCARD_ENABLED)
+//   1 = built-in flash (SPIFFS "assets" partition; auto-enabled when SD Kconfig is off)
+#define RECORD_TO_FLASH  1
+
+#if RECORD_TO_FLASH || !defined(CONFIG_CUBE32_SDCARD_ENABLED)
+#  define USE_FLASH_STORAGE
+#  define STORAGE_MOUNT_POINT  "/assets"
+#endif
 
 // File names (8.3 FAT)
 static const char *FILE_NONE = "aec_none.wav";
@@ -113,7 +127,7 @@ static const char *mode_files[MODE_COUNT] = { nullptr, nullptr, nullptr };
 static app_state_t          s_state          = STATE_IDLE;
 static SemaphoreHandle_t    s_state_mutex    = nullptr;
 static volatile bool        s_stop_requested = false;
-static aec_test_mode_t      s_current_mode   = MODE_NO_AEC;
+static aec_test_mode_t      s_current_mode   = MODE_SW_AEC;
 static EventGroupHandle_t   s_evt_group      = nullptr;
 static QueueHandle_t        s_ref_queue      = nullptr;  // SW AEC ref frames
 static TaskHandle_t         s_rec_task       = nullptr;
@@ -121,6 +135,13 @@ static TaskHandle_t         s_play_task      = nullptr;
 static int                  s_elapsed_sec    = 0;
 static int                  s_aec_chunk      = 512;   // shared with tone task
 static volatile bool        s_tone_enabled   = true;  // play tone during test?
+static bool                 s_hw_aec_avail   = false;
+static aec_test_mode_t      s_mode_map[MODE_COUNT];
+static int                  s_mode_count     = 0;
+#ifdef USE_FLASH_STORAGE
+static bool                 s_flash_mounted  = false;
+static lv_obj_t            *s_boot_label     = nullptr;  // pre-UI status during mount
+#endif
 
 // LVGL widgets
 static lv_obj_t *s_status_label   = nullptr;
@@ -150,6 +171,10 @@ static void audio_record_task(void *arg);
 static void wav_playback_task(void *arg);
 static bool write_wav_header(FILE *f, uint32_t sr, uint16_t ch, uint32_t data_sz);
 static bool update_wav_header(FILE *f, uint32_t data_sz);
+#ifdef USE_FLASH_STORAGE
+static bool mount_spiffs(void);
+static void list_flash_files(void);
+#endif
 
 // ============================================================================
 // Helpers
@@ -220,6 +245,82 @@ static bool update_wav_header(FILE *f, uint32_t data_sz) {
 }
 
 // ============================================================================
+// Storage Path Helper
+// ============================================================================
+
+#ifdef USE_FLASH_STORAGE
+
+static std::string get_file_path(const char *fname) {
+    return std::string(STORAGE_MOUNT_POINT) + "/" + fname;
+}
+
+static bool mount_spiffs(void) {
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path            = STORAGE_MOUNT_POINT,
+        .partition_label      = "assets",
+        .max_files            = 5,
+        .format_if_mount_failed = false,
+    };
+    esp_err_t ret = esp_vfs_spiffs_register(&conf);
+    if (ret == ESP_FAIL) {
+        // ESP_FAIL usually means SPIFFS_ERR_PROBE_TOO_FEW_BLOCKS — partition has
+        // never been formatted (blank flash on first use). Format once and retry.
+        ESP_LOGW(TAG, "SPIFFS partition unformatted, formatting now (first use)...");
+        if (lvgl_port_lock(50)) {
+            if (s_boot_label) {
+                lv_label_set_text(s_boot_label,
+                    LV_SYMBOL_WARNING " Formatting flash...\nFirst boot, please wait");
+                lv_obj_set_style_text_color(s_boot_label, lv_color_hex(0xffaa00), 0);
+            }
+            lvgl_port_unlock();
+        }
+        conf.format_if_mount_failed = true;
+        ret = esp_vfs_spiffs_register(&conf);
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SPIFFS mount failed: %s", esp_err_to_name(ret));
+        return false;
+    }
+    s_flash_mounted = true;
+    size_t total = 0, used = 0;
+    esp_spiffs_info("assets", &total, &used);
+    ESP_LOGI(TAG, "SPIFFS mounted at %s  total=%u used=%u bytes",
+             STORAGE_MOUNT_POINT, (unsigned)total, (unsigned)used);
+    return true;
+}
+
+static void list_flash_files(void) {
+    DIR *dir = opendir(STORAGE_MOUNT_POINT);
+    if (!dir) {
+        ESP_LOGW(TAG, "Cannot open dir %s", STORAGE_MOUNT_POINT);
+        return;
+    }
+    ESP_LOGI(TAG, "Files on Flash (%s):", STORAGE_MOUNT_POINT);
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        char full_path[300];  // NAME_MAX(255) + mount point + '/' + NUL
+        snprintf(full_path, sizeof(full_path), "%s/%s", STORAGE_MOUNT_POINT, entry->d_name);
+        FILE *fp = fopen(full_path, "rb");
+        long size = 0;
+        if (fp) {
+            fseek(fp, 0, SEEK_END);
+            size = ftell(fp);
+            fclose(fp);
+        }
+        ESP_LOGI(TAG, "  %-24s  %ld bytes", entry->d_name, size);
+    }
+    closedir(dir);
+}
+
+#else  // USE_FLASH_STORAGE not defined — use SD card
+
+static std::string get_file_path(const char *fname) {
+    return cube32::SDCard::instance().getFullPath(fname);
+}
+
+#endif  // USE_FLASH_STORAGE
+
+// ============================================================================
 // UI Creation
 // ============================================================================
 
@@ -234,9 +335,27 @@ static void create_ui(void) {
     lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
 
-    // Mode dropdown
+    // Mode dropdown. HW AEC requires the Dedicated Audio Module's ES7210
+    // speaker-reference slot and is not meaningful for the integrated ES8311.
     s_mode_dropdown = lv_dropdown_create(scr);
-    lv_dropdown_set_options(s_mode_dropdown, "No AEC\nHW AEC\nSW AEC");
+#ifdef CONFIG_CUBE32_AUDIO_ENABLED
+    s_hw_aec_avail = (cube32::AudioCodec::instance().getConfig().adc_source
+                      == cube32::AdcSource::ES7210);
+#endif
+    if (s_hw_aec_avail) {
+        lv_dropdown_set_options(s_mode_dropdown, "No AEC\nHW AEC\nSW AEC");
+        s_mode_map[0] = MODE_NO_AEC;
+        s_mode_map[1] = MODE_HW_AEC;
+        s_mode_map[2] = MODE_SW_AEC;
+        s_mode_count = 3;
+    } else {
+        lv_dropdown_set_options(s_mode_dropdown, "No AEC\nSW AEC");
+        s_mode_map[0] = MODE_NO_AEC;
+        s_mode_map[1] = MODE_SW_AEC;
+        s_mode_count = 2;
+    }
+    // SW AEC works for either audio module and is the default selection.
+    lv_dropdown_set_selected(s_mode_dropdown, (uint32_t)(s_mode_count - 1));
     lv_obj_set_size(s_mode_dropdown, 130, 30);
     lv_obj_set_style_text_font(s_mode_dropdown, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_color(s_mode_dropdown, lv_color_hex(0x2d2d4e), 0);
@@ -344,9 +463,12 @@ static void create_ui(void) {
     lv_obj_align(s_volume_slider, LV_ALIGN_BOTTOM_MID, 0, -18);
     lv_obj_add_event_cb(s_volume_slider, volume_slider_cb, LV_EVENT_VALUE_CHANGED, nullptr);
 
-    // SD status
+    // Storage status
     lv_obj_t *sd_lbl = lv_label_create(scr);
-#ifdef CONFIG_CUBE32_SDCARD_ENABLED
+#ifdef USE_FLASH_STORAGE
+    lv_label_set_text(sd_lbl, LV_SYMBOL_SAVE " Flash");
+    lv_obj_set_style_text_color(sd_lbl, lv_color_hex(0x00ff88), 0);
+#elif defined(CONFIG_CUBE32_SDCARD_ENABLED)
     if (cube32::SDCard::instance().isInitialized()) {
         lv_label_set_text(sd_lbl, LV_SYMBOL_SD_CARD " SD: OK");
         lv_obj_set_style_text_color(sd_lbl, lv_color_hex(0x00ff88), 0);
@@ -368,12 +490,16 @@ static void create_ui(void) {
 
 /** Refresh play-button enabled state based on file existence. */
 static void refresh_play_buttons(void) {
-#ifdef CONFIG_CUBE32_SDCARD_ENABLED
-    cube32::SDCard& sd = cube32::SDCard::instance();
-    if (!sd.isInitialized()) return;
     const char *fnames[MODE_COUNT] = { FILE_NONE, FILE_HW, FILE_SW };
+#ifdef USE_FLASH_STORAGE
+    if (!s_flash_mounted) return;
+#elif defined(CONFIG_CUBE32_SDCARD_ENABLED)
+    if (!cube32::SDCard::instance().isInitialized()) return;
+#else
+    return;
+#endif
     for (int i = 0; i < MODE_COUNT; i++) {
-        std::string path = sd.getFullPath(fnames[i]);
+        std::string path = get_file_path(fnames[i]);
         FILE *f = fopen(path.c_str(), "rb");
         if (f) {
             fclose(f);
@@ -382,7 +508,6 @@ static void refresh_play_buttons(void) {
             lv_obj_add_state(s_play_btns[i], LV_STATE_DISABLED);
         }
     }
-#endif
 }
 
 static void update_ui_state(void) {
@@ -432,19 +557,29 @@ static void update_ui_state(void) {
 
 static void record_btn_cb(lv_event_t *e) {
     (void)e;
-#ifndef CONFIG_CUBE32_SDCARD_ENABLED
-    lv_label_set_text(s_status_label, "SD Card disabled!");
-    lv_obj_set_style_text_color(s_status_label, lv_color_hex(0xff4444), 0);
-    return;
-#else
+#ifdef USE_FLASH_STORAGE
+    if (!s_flash_mounted) {
+        lv_label_set_text(s_status_label, "Flash not ready!");
+        lv_obj_set_style_text_color(s_status_label, lv_color_hex(0xff4444), 0);
+        return;
+    }
+#elif defined(CONFIG_CUBE32_SDCARD_ENABLED)
     if (!cube32::SDCard::instance().isInitialized()) {
         lv_label_set_text(s_status_label, "Insert SD Card!");
         lv_obj_set_style_text_color(s_status_label, lv_color_hex(0xff4444), 0);
         return;
     }
+#else
+    lv_label_set_text(s_status_label, "No storage!");
+    lv_obj_set_style_text_color(s_status_label, lv_color_hex(0xff4444), 0);
+    return;
+#endif
     if (get_state() != STATE_IDLE) return;
 
-    s_current_mode = (aec_test_mode_t)lv_dropdown_get_selected(s_mode_dropdown);
+    int selected = (int)lv_dropdown_get_selected(s_mode_dropdown);
+    s_current_mode = (selected >= 0 && selected < s_mode_count)
+        ? s_mode_map[selected]
+        : MODE_SW_AEC;
     s_tone_enabled = lv_obj_has_state(s_tone_checkbox, LV_STATE_CHECKED);
     s_stop_requested = false;
     s_elapsed_sec = 0;
@@ -453,7 +588,6 @@ static void record_btn_cb(lv_event_t *e) {
 
     // Create record + tone tasks
     xTaskCreate(audio_record_task, "aec_rec", 8192, nullptr, 6, &s_rec_task);
-#endif
 }
 
 static void stop_btn_cb(lv_event_t *e) {
@@ -465,7 +599,7 @@ static void stop_btn_cb(lv_event_t *e) {
 }
 
 static void play_btn_cb(lv_event_t *e) {
-#ifndef CONFIG_CUBE32_SDCARD_ENABLED
+#if !defined(USE_FLASH_STORAGE) && !defined(CONFIG_CUBE32_SDCARD_ENABLED)
     return;
 #else
     if (get_state() != STATE_IDLE) return;
@@ -474,7 +608,7 @@ static void play_btn_cb(lv_event_t *e) {
     if (idx < 0 || idx >= MODE_COUNT) return;
 
     const char *fname = file_for_mode((aec_test_mode_t)idx);
-    std::string path = cube32::SDCard::instance().getFullPath(fname);
+    std::string path = get_file_path(fname);
     FILE *f = fopen(path.c_str(), "rb");
     if (!f) {
         if (lvgl_port_lock(50)) {
@@ -578,7 +712,9 @@ static void audio_record_task(void *arg) {
                                                       cube32::AecMode::NONE;
         codec.end();
         {
-            cube32::AudioCodecConfig cfg = CUBE32_AUDIO_CONFIG_DEFAULT();
+            // Use getConfig() as base to preserve hw-detected settings
+            // (ES8311 I2C address, ADC source, PA pin) across end()/begin() cycles.
+            cube32::AudioCodecConfig cfg = codec.getConfig();
             cfg.output_sample_rate = AEC_SAMPLE_RATE_HZ;
             cfg.input_sample_rate  = AEC_SAMPLE_RATE_HZ;  // must match output for all modes; driver auto-clamp only fires when aec_mode != NONE
             cfg.aec_mode           = aec;
@@ -589,7 +725,7 @@ static void audio_record_task(void *arg) {
             }
         }
 
-        int channels = codec.getInputChannels();  // 2 for HW AEC, 1 otherwise
+        int channels = codec.getInputChannels();  // 4 for ES7210 TDM, 1 for ES8311 ADC
         ESP_LOGI(TAG, "Codec reinit: %d Hz, %d ch, aec=%d",
                  AEC_SAMPLE_RATE_HZ, channels, (int)aec);
 
@@ -610,7 +746,10 @@ static void audio_record_task(void *arg) {
         s_aec_chunk = 512;    // reset shared value
 
         if (mode == MODE_HW_AEC) {
-            hw_aec = afe_aec_create("MR", AEC_FILTER_LENGTH, AFE_TYPE_VC, AFE_MODE_LOW_COST);
+            // ES7210 produces four TDM slots. Slot 0 is Mic 1 and slot 1 is
+            // the analog speaker-reference loopback; ignore slots 2 and 3.
+            hw_aec = afe_aec_create("MRNN", AEC_FILTER_LENGTH,
+                                    AFE_TYPE_VC, AFE_MODE_LOW_COST);
             if (!hw_aec) { ESP_LOGE(TAG, "afe_aec_create failed"); break; }
             aec_chunk = afe_aec_get_chunksize(hw_aec);
             ESP_LOGI(TAG, "HW AEC created, chunk=%d samples", aec_chunk);
@@ -631,27 +770,28 @@ static void audio_record_task(void *arg) {
                 16, read_samples * sizeof(int16_t), MALLOC_CAP_INTERNAL);
         int16_t *out_buf  = (int16_t *)heap_caps_aligned_alloc(
                 16, aec_chunk * sizeof(int16_t), MALLOC_CAP_INTERNAL);
+        int16_t *mic_buf  = (int16_t *)heap_caps_aligned_alloc(
+            16, aec_chunk * sizeof(int16_t), MALLOC_CAP_INTERNAL);
         int16_t *ref_buf  = nullptr;
         if (mode == MODE_SW_AEC) {
             ref_buf = (int16_t *)heap_caps_aligned_alloc(
                     16, aec_chunk * sizeof(int16_t), MALLOC_CAP_INTERNAL);
         }
 
-        if (!read_buf || !out_buf || (mode == MODE_SW_AEC && !ref_buf)) {
+        if (!read_buf || !out_buf || !mic_buf || (mode == MODE_SW_AEC && !ref_buf)) {
             ESP_LOGE(TAG, "Buffer alloc failed");
-            heap_caps_free(read_buf); heap_caps_free(out_buf); heap_caps_free(ref_buf);
+            heap_caps_free(read_buf); heap_caps_free(out_buf); heap_caps_free(mic_buf); heap_caps_free(ref_buf);
             if (hw_aec) afe_aec_destroy(hw_aec);
             if (sw_aec) aec_destroy(sw_aec);
             break;
         }
 
         // ---- Open WAV ----
-        cube32::SDCard &sd = cube32::SDCard::instance();
-        std::string path = sd.getFullPath(fname);
+        std::string path = get_file_path(fname);
         FILE *wav = fopen(path.c_str(), "wb");
         if (!wav) {
             ESP_LOGE(TAG, "fopen(%s) failed: %s", path.c_str(), strerror(errno));
-            heap_caps_free(read_buf); heap_caps_free(out_buf); heap_caps_free(ref_buf);
+            heap_caps_free(read_buf); heap_caps_free(out_buf); heap_caps_free(mic_buf); heap_caps_free(ref_buf);
             if (hw_aec) afe_aec_destroy(hw_aec);
             if (sw_aec) aec_destroy(sw_aec);
             break;
@@ -672,20 +812,27 @@ static void audio_record_task(void *arg) {
         int max_frames = (AEC_SAMPLE_RATE_HZ * TEST_DURATION_SEC) / aec_chunk;
 
         for (int fr = 0; fr < max_frames && !s_stop_requested; fr++) {
-            // Read mic (+ hw ref if HW AEC)
+            // Read the complete ES7210 TDM frame, then select Mic 1 (slot 0).
             codec.read(read_buf, read_samples);
+            if (channels == 4) {
+                for (int i = 0; i < aec_chunk; ++i) {
+                    mic_buf[i] = read_buf[i * 4];
+                }
+            } else {
+                memcpy(mic_buf, read_buf, aec_chunk * sizeof(int16_t));
+            }
 
             const int16_t *write_ptr = nullptr;
             int write_samples = aec_chunk;
 
             switch (mode) {
                 case MODE_NO_AEC:
-                    write_ptr = read_buf;
+                    write_ptr = mic_buf;
                     break;
 
                 case MODE_HW_AEC: {
-                    // read_buf is interleaved [mic0, ref0, mic1, ref1, ...]
-                    // afe_aec_process accepts interleaved "MR" directly
+                    // The AEC input format is "MRNN": raw ES7210 TDM slots
+                    // [Mic 1, speaker reference, unused, unused].
                     afe_aec_process(hw_aec, read_buf, out_buf);
                     write_ptr = out_buf;
                     break;
@@ -694,17 +841,17 @@ static void audio_record_task(void *arg) {
                 case MODE_SW_AEC: {
                     // Get reference frame from queue (block up to 100 ms)
                     if (xQueueReceive(s_ref_queue, ref_buf, pdMS_TO_TICKS(100)) == pdTRUE) {
-                        aec_process(sw_aec, read_buf, ref_buf, out_buf);
+                        aec_process(sw_aec, mic_buf, ref_buf, out_buf);
                         write_ptr = out_buf;
                     } else {
                         // No ref available — write raw mic
-                        write_ptr = read_buf;
+                        write_ptr = mic_buf;
                     }
                     break;
                 }
 
                 default:
-                    write_ptr = read_buf;
+                    write_ptr = mic_buf;
                     break;
             }
 
@@ -745,6 +892,7 @@ static void audio_record_task(void *arg) {
 
         heap_caps_free(read_buf);
         heap_caps_free(out_buf);
+        heap_caps_free(mic_buf);
         heap_caps_free(ref_buf);
 
         if (hw_aec) afe_aec_destroy(hw_aec);
@@ -782,10 +930,9 @@ static void wav_playback_task(void *arg) {
 #ifdef CONFIG_CUBE32_AUDIO_ENABLED
     do {
         cube32::AudioCodec &codec = cube32::AudioCodec::instance();
-        cube32::SDCard &sd = cube32::SDCard::instance();
 
         const char *fname = file_for_mode((aec_test_mode_t)idx);
-        std::string path = sd.getFullPath(fname);
+        std::string path = get_file_path(fname);
 
         FILE *f = fopen(path.c_str(), "rb");
         if (!f) { ESP_LOGE(TAG, "Cannot open %s", path.c_str()); break; }
@@ -803,7 +950,8 @@ static void wav_playback_task(void *arg) {
         // Reinit codec at the WAV sample rate to guarantee I2S clock matches
         codec.end();
         {
-            cube32::AudioCodecConfig cfg = CUBE32_AUDIO_CONFIG_DEFAULT();
+            // Use getConfig() as base to preserve hw-detected settings across reinit.
+            cube32::AudioCodecConfig cfg = codec.getConfig();
             cfg.output_sample_rate = hdr.sample_rate;
             cfg.input_sample_rate  = hdr.sample_rate;
             codec.begin(cfg);
@@ -890,7 +1038,28 @@ extern "C" void app_main(void) {
     mode_files[MODE_HW_AEC] = FILE_HW;
     mode_files[MODE_SW_AEC] = FILE_SW;
 
+#ifdef USE_FLASH_STORAGE
+    if (lvgl_port_lock(500)) {
+        lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x1a1a2e), 0);
+        s_boot_label = lv_label_create(lv_scr_act());
+        lv_label_set_text(s_boot_label, LV_SYMBOL_SAVE " Mounting flash...");
+        lv_obj_set_style_text_color(s_boot_label, lv_color_hex(0xaaaaaa), 0);
+        lv_obj_set_style_text_font(s_boot_label, &lv_font_montserrat_14, 0);
+        lv_obj_center(s_boot_label);
+        lvgl_port_unlock();
+    }
+    if (mount_spiffs()) {
+        list_flash_files();
+    }
+#endif
+
     if (lvgl_port_lock(1000)) {
+#ifdef USE_FLASH_STORAGE
+        if (s_boot_label) {
+            lv_obj_del(s_boot_label);
+            s_boot_label = nullptr;
+        }
+#endif
         create_ui();
         lvgl_port_unlock();
     }

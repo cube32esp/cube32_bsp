@@ -1,5 +1,11 @@
 file(GLOB_RECURSE SOURCES "src/*.c" "src/*.cpp")
 
+# LVGL configuration symbols are only generated when LVGL is enabled, so do
+# not compile its implementation in non-LVGL builds.
+if(NOT CONFIG_CUBE32_LVGL_ENABLED)
+    list(FILTER SOURCES EXCLUDE REGEX "src/drivers/lvgl/.*")
+endif()
+
 # Conditionally exclude audio source files if audio is disabled
 if(NOT CONFIG_CUBE32_AUDIO_ENABLED)
     list(FILTER SOURCES EXCLUDE REGEX "src/drivers/audio/.*")
@@ -34,6 +40,8 @@ set(PRIV_REQUIRED_COMPONENTS
     esp_lcd_touch
     esp_lcd_touch_cst816s
     esp_lcd_touch_ft5x06
+    esp_lcd_touch_gt911
+    esp_lcd_st7796
     esp_driver_gpio 
     esp_driver_i2c 
     esp_driver_spi
@@ -54,10 +62,9 @@ set(PRIV_REQUIRED_COMPONENTS
     app_update
 )
 
-# Always add bt when BLE OTA is enabled. In MINIMAL_BUILD mode, conditional
-# PRIV_REQUIRES are resolved during the component scan before sdkconfig is
-# fully loaded, so an unconditional dep is safer. Doing it inside the BLE OTA
-# guard is sufficient since bt is only needed when BLE OTA compiles.
+# Add bt only when BLE OTA sources are compiled. The explicit include and link
+# handling below covers MINIMAL_BUILD, where conditional PRIV_REQUIRES may be
+# resolved before sdkconfig is fully loaded.
 if(CONFIG_CUBE32_BLE_OTA_ENABLED AND CONFIG_BT_NIMBLE_ENABLED)
     list(APPEND PRIV_REQUIRED_COMPONENTS bt)
 endif()
@@ -98,11 +105,11 @@ if(CONFIG_CUBE32_BLE_OTA_ENABLED AND CONFIG_BT_NIMBLE_ENABLED)
         endif()
     endforeach()
     if(_bt_resolved_includes)
-        target_include_directories(__idf_cube32_bsp PRIVATE ${_bt_resolved_includes})
+        target_include_directories(${COMPONENT_LIB} PRIVATE ${_bt_resolved_includes})
     else()
         # Fallback if bt properties are not yet set: add the well-known
         # NimBLE porting paths directly from IDF_PATH.
-        target_include_directories(__idf_cube32_bsp PRIVATE
+        target_include_directories(${COMPONENT_LIB} PRIVATE
             "$ENV{IDF_PATH}/components/bt/host/nimble/nimble/porting/nimble/include"
             "$ENV{IDF_PATH}/components/bt/host/nimble/nimble/nimble/include"
             "$ENV{IDF_PATH}/components/bt/host/nimble/port/include"
@@ -112,6 +119,6 @@ if(CONFIG_CUBE32_BLE_OTA_ENABLED AND CONFIG_BT_NIMBLE_ENABLED)
     # Also link against the bt library so NimBLE symbols resolve at link time.
     # PRIV_REQUIRES propagation is unreliable in MINIMAL_BUILD for the same
     # reason as the include dirs above.
-    target_link_libraries(__idf_cube32_bsp PRIVATE idf::bt)
+    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::bt)
 endif()
 

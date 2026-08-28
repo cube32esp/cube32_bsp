@@ -14,6 +14,7 @@
 
 #include "utils/common.h"
 #include "drivers/display/st7789.h"
+#include "drivers/display/st7796.h"
 #ifdef CONFIG_CUBE32_TOUCH_ENABLED
 #include "drivers/touch/touch.h"
 #endif
@@ -269,6 +270,22 @@ private:
     cube32_result_t initLvglPort(const cube32_lvgl_config_t& config);
     cube32_result_t addDisplay(const cube32_lvgl_config_t& config);
 
+    // ---- Active display dispatch helpers ----
+    // LvglDisplay supports both ST7789Display and ST7796Display (duck-typed,
+    // no shared base class). m_active_display_ic is resolved from the
+    // hardware manifest at the top of begin() and used by these helpers to
+    // route to whichever concrete display singleton is actually in use.
+    bool activeIsInitialized() const;
+    esp_lcd_panel_handle_t activePanelHandle() const;
+    esp_lcd_panel_io_handle_t activeIOHandle() const;
+    uint16_t activeBaseWidth() const;
+    uint16_t activeBaseHeight() const;
+    uint16_t activeWidth() const;
+    uint16_t activeHeight() const;
+    uint16_t activeRotation() const;
+    cube32_result_t activeSetRotation(uint16_t rotation);
+
+    uint8_t m_active_display_ic = CUBE32_DISPLAY_IC_ST7789;
     lv_display_t* m_display = nullptr;
     lv_indev_t* m_touch_indev = nullptr;
     lv_indev_t* m_usb_mouse_indev = nullptr;

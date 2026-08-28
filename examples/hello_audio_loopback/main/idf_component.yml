@@ -1,0 +1,6 @@
+dependencies:
+  cube32esp/cube32_bsp:
+    path: "../../../"
+  espressif/esp-sr: "~2.1.5"
+  idf:
+    version: ">=5.4.0"

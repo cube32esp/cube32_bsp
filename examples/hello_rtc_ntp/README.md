@@ -50,6 +50,10 @@ In `idf.py menuconfig`:
 - Set WiFi SSID (your network name)
 - Set WiFi Password
 
+The sdkconfig credentials are the fallback credentials. At boot, the example uses a WiFi SSID/password provisioned through the CUBE32 Mobile App over BLE only when both values are present in NVS and the saved SSID is non-empty. Otherwise it uses the sdkconfig values above.
+
+BLE provisioning changes NVS only. Restart the device after provisioning for the new WiFi credentials to take effect. The startup log identifies the selected source (`NVS` or `sdkconfig fallback`) and SSID; it never logs the password.
+
 > **Note:** WiFi credentials are always required even when using the modem — they are used as the fallback connection if the modem module is not present at boot.
 
 **Optional — LTE Modem:**
@@ -131,7 +135,9 @@ The connection mode badge in the top-right corner (`📞 4G/LTE` or `📶 WiFi`)
 ## Troubleshooting
 
 **WiFi won't connect:**
-- Check SSID and password in menuconfig
+- Check the startup log to confirm the credential source and SSID.
+- If `WiFi credentials: NVS` is logged, update the WiFi SSID and password using the CUBE32 Mobile App, then restart.
+- If `WiFi credentials: sdkconfig fallback` is logged, check the SSID and password in menuconfig.
 - Verify WiFi network is 2.4GHz (ESP32 doesn't support 5GHz)
 
 **LTE modem not used despite being enabled:**

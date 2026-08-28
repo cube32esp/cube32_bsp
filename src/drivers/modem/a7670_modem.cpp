@@ -650,8 +650,15 @@ cube32_result_t A7670Modem::initUSB() {
         }
 
         if (err == esp_modem::terminal_error::DEVICE_GONE) {
+            // In DUAL_MODE both terminals (AT on IF4, Data on IF5) fire DEVICE_GONE
+            // independently.  Use an atomic exchange to let only the first one
+            // execute the full disconnect path; the second one exits early.
+            ModemState prev = m_state.exchange(ModemState::ERROR);
+            if (prev == ModemState::ERROR) {
+                ESP_LOGD(TAG, "USB device disconnected (duplicate event ignored)");
+                return;
+            }
             ESP_LOGE(TAG, "USB device disconnected");
-            setState(ModemState::ERROR);
             m_ppp_connected = false;
             if (m_event_group) {
                 xEventGroupSetBits(m_event_group, MODEM_PPP_DISCONNECTED_BIT);
@@ -717,12 +724,21 @@ cube32_result_t A7670Modem::initUSB() {
     ESP_LOGI(TAG, "USB modem connected successfully");
     setState(ModemState::CONNECTED);
     
-    // Give modem time to initialize after USB enumeration
-    // Following modem_console pattern - don't sync immediately, just set to command mode
-    // The modem needs time after USB connection before AT commands work reliably
+    // The A7670 performs an internal USB bus reset ~1 s after enumeration and then
+    // sends a burst of URCs (CPIN: READY, CALL READY, SMS READY).  Waiting 5 s lets
+    // the internal reset complete and all URCs drain before we attempt AT communication.
     ESP_LOGI(TAG, "Waiting for modem to be ready...");
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
+    vTaskDelay(pdMS_TO_TICKS(5000));
+
+    // Disable echo and drain any residual URC data accumulated during the wait.
+    // ATE0 makes the sync() parser more reliable (no echoed command in response).
+    // Ignore errors here — the point is to flush, not to succeed.
+    {
+        std::string flush_resp;
+        ESP_LOGI(TAG, "Flushing URCs and disabling echo (ATE0)...");
+        sendCommand("E0", flush_resp, 3000);
+    }
+
     // Try to sync with retries
     bool synced = false;
     for (int retry = 0; retry < 5; retry++) {

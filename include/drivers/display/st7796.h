@@ -1,20 +1,31 @@
 /**
- * @file st7789.h
- * @brief CUBE32 ST7789 TFT Display Driver
- * 
- * This driver provides support for the ST7789 TFT display controller
- * commonly used with 240x240 and 240x320 resolution displays.
- * 
- * The driver uses the shared SPI bus from utils/spi_bus.h and
- * ESP-IDF's esp_lcd component for efficient display operations.
+ * @file st7796.h
+ * @brief CUBE32 ST7796S TFT Display Driver
+ *
+ * This driver provides support for the ST7796S TFT display controller
+ * used on the 320x320 GT911-touch display board.
+ *
+ * The driver mirrors drivers/display/st7789.h's public API (duck-typed,
+ * no shared base class) so callers such as cube32.cpp and
+ * drivers/lvgl/lvgl_driver.cpp can dispatch between the two display
+ * drivers at runtime based on the auto-detected display model
+ * (see cube32_display_ic_t in st7789.h and CUBE32_DISPLAY_MODEL_TABLE
+ * in cube32_config.h).
+ *
+ * NOTE: displayOn()/displayOff()/setBacklight() issue the generic
+ * esp_lcd_panel_disp_on_off()/GPIO backlight commands, but do NOT call
+ * into PMU::setDisplayBacklight() — the backlight/power-rail wiring for
+ * this board has not been finalized yet. setPrismMode() likewise only
+ * writes the MADCTL register (no board-specific control involved).
  */
 
-#ifndef CUBE32_DRIVERS_DISPLAY_ST7789_H
-#define CUBE32_DRIVERS_DISPLAY_ST7789_H
+#ifndef CUBE32_DRIVERS_DISPLAY_ST7796_H
+#define CUBE32_DRIVERS_DISPLAY_ST7796_H
 
 #include "utils/common.h"
 #include "utils/spi_bus.h"
 #include "cube32_config.h"
+#include "drivers/display/st7789.h"  // reuses cube32_display_ic_t, MADCTL bit macros, cube32_rgb565()/color macros
 
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
@@ -29,41 +40,30 @@ extern "C" {
 // ============================================================================
 
 /**
- * @brief ST7789 display default parameters
+ * @brief ST7796S display default parameters
  */
-#define CUBE32_ST7789_LCD_CMD_BITS    8
-#define CUBE32_ST7789_LCD_PARAM_BITS  8
-#define CUBE32_ST7789_LCD_BIT_DEPTH   16
+#define CUBE32_ST7796_LCD_CMD_BITS    8
+#define CUBE32_ST7796_LCD_PARAM_BITS  8
+#define CUBE32_ST7796_LCD_BIT_DEPTH   16
 
 /**
- * @brief Display controller IC types supported.
+ * @brief ST7796S default SPI pixel clock.
  *
- * Values mirror the `display_ic` field in `cube32_display_model_info_t`
- * (see cube32_config.h). Kept here (alongside the "base" display driver)
- * rather than in cube32_config.h to avoid a circular include, the same
- * pattern used for `cube32_touch_ic_t` in drivers/touch/touch.h.
+ * Deliberately lower than CUBE32_LCD_PIXEL_CLK_HZ (40MHz, tuned/validated
+ * on the ST7789 boards' wiring). On first hardware bring-up this panel
+ * showed color corruption + vertical banding at 40MHz — a classic SPI
+ * signal-integrity symptom (bit errors from clock speed vs. wiring/cable
+ * length) — so this board defaults to a more conservative 10MHz. Raise
+ * this back toward 40MHz once the wiring/signal integrity is validated.
  */
-typedef enum {
-    CUBE32_DISPLAY_IC_ST7789 = 1,   ///< ST7789 (240x240 / 240x320 boards)
-    CUBE32_DISPLAY_IC_ST7796,       ///< ST7796S (320x320 board)
-} cube32_display_ic_t;
-
-/**
- * @brief ST7789 MADCTL register definitions for mirror/rotation control
- */
-#define ST7789_MADCTL       0x36  ///< Memory Data Access Control register
-#define ST7789_MADCTL_MY    0x80  ///< Row Address Order (Y-Mirror)
-#define ST7789_MADCTL_MX    0x40  ///< Column Address Order (X-Mirror)
-#define ST7789_MADCTL_MV    0x20  ///< Row/Column Exchange
-#define ST7789_MADCTL_ML    0x10  ///< Vertical Refresh Order
-#define ST7789_MADCTL_BGR   0x08  ///< BGR color order (vs RGB)
+#define CUBE32_ST7796_PIXEL_CLK_HZ    (40 * 1000 * 1000)
 
 // ============================================================================
 // Configuration Structures
 // ============================================================================
 
 /**
- * @brief ST7789 display configuration structure
+ * @brief ST7796S display configuration structure
  */
 typedef struct {
     // SPI configuration
@@ -72,41 +72,63 @@ typedef struct {
     int rst_pin;                    ///< Reset GPIO pin (-1 if not used)
     int bl_pin;                     ///< Backlight GPIO pin (-1 if not used)
     uint32_t pixel_clock_hz;        ///< SPI clock frequency for pixel transfer
-    
+
     // Display configuration
     uint16_t h_res;                 ///< Horizontal resolution
     uint16_t v_res;                 ///< Vertical resolution
-    uint16_t x_gap;                 ///< X offset/gap (for displays smaller than frame buffer)
-    uint16_t y_gap;                 ///< Y offset/gap (for displays smaller than frame buffer)
+    uint16_t x_gap;                 ///< X offset/gap
+    uint16_t y_gap;                 ///< Y offset/gap
     uint16_t rotation;              ///< Display rotation (0, 90, 180, 270)
     bool mirror_x;                  ///< Mirror X axis
     bool mirror_y;                  ///< Mirror Y axis
     bool swap_xy;                   ///< Swap X and Y axis
-    bool invert_color;              ///< Invert colors
-    bool bgr_order;                 ///< Use BGR color order instead of RGB
-    
+    bool invert_color;               ///< Invert colors
+    bool bgr_order;                  ///< Use BGR color order instead of RGB
+
     // Backlight configuration
     uint8_t bl_on_level;            ///< Backlight on level (1 = active high, 0 = active low)
-} cube32_st7789_config_t;
+} cube32_st7796_config_t;
 
 /**
- * @brief Default ST7789 configuration using pins from cube32_config.h
+ * @brief Default ST7796S configuration using the same SPI/CS pins as the
+ *        existing TFT display (see cube32_config.h). Resolution is
+ *        auto-detected/overridden by the caller (see cube32.cpp) before
+ *        begin(), exactly like CUBE32_ST7789_CONFIG_DEFAULT().
  *
- * NOTE: h_res/v_res are inert fallback placeholders here. The real
- * resolution is auto-detected from the touch controller's I2C address (see
- * CUBE32_DISPLAY_MODEL_TABLE in cube32_config.h) and set explicitly by the
- * caller before begin() — e.g. see cube32.cpp.
+ * All of the settings below are CONFIRMED against the panel vendor's own
+ * init sequence (BOE3.92IPS(GV039Z2Q-N80)-ST7796U-2.2Gamma-20211203.INI),
+ * validated via the standalone apps/LCD_ST7796_Test raw bring-up test:
  *
- * Rotation defaults to 0; actual rotation is applied from NVS config at runtime.
+ * - invert_color = true — matches the vendor's Display Inversion ON (0x21)
+ *   command baked into s_vendor_init_cmds (st7796.cpp).
+ * - bgr_order = true — matches the vendor's MADCTL (0x36) = 0x48, which has
+ *   the BGR bit set. A clean color-bar/corner-square test with the vendor
+ *   init sequence confirmed correct hues (RED shows red, GREEN shows
+ *   green, etc.) with this setting.
+ * - y_gap = 0 — the vendor init's Display Function Control (0xB6) command
+ *   sets the gate line count (NL) to exactly 320. The ESP-IDF
+ *   esp_lcd_st7796 driver's built-in default init sequence never sends
+ *   0xB6 at all, leaving the panel at its power-on-default gate count
+ *   (very likely 480, the common ST7796 native GRAM) — THAT was the real
+ *   root cause of the earlier "top half shows static" bug, not a
+ *   fundamental 480-row hardware limit. With 0xB6 now baked into
+ *   s_vendor_init_cmds (st7796.cpp), no y_gap workaround is needed.
+ * - mirror_x/mirror_y/swap_xy = false — this is the LOGICAL "no rotation"
+ *   request. The vendor's MADCTL=0x48 bakes in MX=1 as this panel's native
+ *   "book" orientation, so ST7796Display wraps the panel handle in an
+ *   orientation-correction shim (see st7796.cpp) that transparently
+ *   inverts the MX bit on every mirror() call — including esp_lvgl_port's
+ *   — so these logical false/false/false values still mean "normal
+ *   reading orientation" on screen.
  */
-#define CUBE32_ST7789_CONFIG_DEFAULT() { \
+#define CUBE32_ST7796_CONFIG_DEFAULT() { \
     .cs_pin = CUBE32_LCD_CS_PIN, \
     .dc_pin = CUBE32_LCD_DC_PIN, \
     .rst_pin = CUBE32_LCD_RST_PIN, \
     .bl_pin = CUBE32_LCD_BL_PIN, \
-    .pixel_clock_hz = CUBE32_LCD_PIXEL_CLK_HZ, \
-    .h_res = CUBE32_LCD_H_RES_FALLBACK, \
-    .v_res = CUBE32_LCD_V_RES_FALLBACK, \
+    .pixel_clock_hz = CUBE32_ST7796_PIXEL_CLK_HZ, \
+    .h_res = 320, \
+    .v_res = 320, \
     .x_gap = 0, \
     .y_gap = 0, \
     .rotation = 0, \
@@ -114,36 +136,9 @@ typedef struct {
     .mirror_y = false, \
     .swap_xy = false, \
     .invert_color = true, \
-    .bgr_order = false, \
+    .bgr_order = true, \
     .bl_on_level = 1, \
 }
-
-/**
- * @brief Convert RGB888 to RGB565
- * 
- * @param r Red value (0-255)
- * @param g Green value (0-255)
- * @param b Blue value (0-255)
- * @return RGB565 color value
- */
-static inline uint16_t cube32_rgb565(uint8_t r, uint8_t g, uint8_t b) {
-    return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-}
-
-// Common colors in RGB565 format
-#define CUBE32_COLOR_BLACK       0x0000
-#define CUBE32_COLOR_WHITE       0xFFFF
-#define CUBE32_COLOR_RED         0xF800
-#define CUBE32_COLOR_GREEN       0x07E0
-#define CUBE32_COLOR_BLUE        0x001F
-#define CUBE32_COLOR_YELLOW      0xFFE0
-#define CUBE32_COLOR_CYAN        0x07FF
-#define CUBE32_COLOR_MAGENTA     0xF81F
-#define CUBE32_COLOR_ORANGE      0xFD20
-#define CUBE32_COLOR_PURPLE      0x8010
-#define CUBE32_COLOR_GRAY        0x8410
-#define CUBE32_COLOR_DARK_GRAY   0x4208
-#define CUBE32_COLOR_LIGHT_GRAY  0xC618
 
 #ifdef __cplusplus
 } // extern "C"
@@ -155,27 +150,28 @@ static inline uint16_t cube32_rgb565(uint8_t r, uint8_t g, uint8_t b) {
 namespace cube32 {
 
 /**
- * @brief ST7789 Display Driver Class (Singleton)
- * 
- * Object-oriented interface for the ST7789 TFT display.
- * Uses the shared SPI bus managed by SPIBus singleton.
- * 
+ * @brief ST7796S Display Driver Class (Singleton)
+ *
+ * Public API intentionally mirrors ST7789Display method-for-method so
+ * callers can dispatch between the two at runtime without a shared base
+ * class (see file header note).
+ *
  * Usage:
  * @code
  *   cube32::SPIBus::instance().init();
- *   cube32::ST7789Display& display = cube32::ST7789Display::instance();
+ *   cube32::ST7796Display& display = cube32::ST7796Display::instance();
  *   display.begin();
- *   
+ *
  *   display.clear(CUBE32_COLOR_BLACK);
  *   display.fillRect(10, 10, 50, 50, CUBE32_COLOR_RED);
  * @endcode
  */
-class ST7789Display {
+class ST7796Display {
 public:
     /**
      * @brief Get the singleton instance
      */
-    static ST7789Display& instance();
+    static ST7796Display& instance();
 
     /**
      * @brief Initialize with default configuration
@@ -185,7 +181,7 @@ public:
     /**
      * @brief Initialize with custom configuration
      */
-    cube32_result_t begin(const cube32_st7789_config_t& config);
+    cube32_result_t begin(const cube32_st7796_config_t& config);
 
     /**
      * @brief Deinitialize the display
@@ -208,19 +204,27 @@ public:
     esp_lcd_panel_io_handle_t getIOHandle() const { return m_io_handle; }
 
     // ---- Display Control ----
-    
+
     /**
-     * @brief Turn on display
+     * @brief Turn on display.
+     *
+     * @note Issues the generic esp_lcd_panel_disp_on_off() command only.
+     * PMU/backlight-rail control for this board is not implemented yet
+     * (board control logic TBD) — see file header note.
      */
     cube32_result_t displayOn();
 
     /**
-     * @brief Turn off display
+     * @brief Turn off display (see displayOn() note).
      */
     cube32_result_t displayOff();
 
     /**
-     * @brief Set backlight brightness (0-100)
+     * @brief Set backlight brightness (0-100).
+     *
+     * @note Drives CUBE32_LCD_BL_PIN directly if configured (mirrors
+     * ST7789Display behavior); no PMU power-rail control (board control
+     * logic TBD for this board) — see file header note.
      */
     cube32_result_t setBacklight(uint8_t brightness_percent);
 
@@ -230,17 +234,12 @@ public:
     cube32_result_t setRotation(uint16_t rotation);
 
     /**
-     * @brief Enable or disable prism/mirror mode
-     * 
-     * Prism mode horizontally mirrors the display output, which is useful
-     * for HUD projections where the image is reflected on a prism or glass.
-     * This directly writes to the ST7789 MADCTL register to toggle the MX bit.
-     * 
+     * @brief Enable or disable prism/mirror mode (MADCTL MX bit toggle).
+     *
      * @param enable true to enable horizontal mirroring, false to disable
      * @param effective_rotation The actual hardware rotation (0, 90, 180, 270).
      *        When using LVGL, pass the LVGL rotation value. Use 0xFFFF to use
      *        the stored configuration rotation (for non-LVGL use cases).
-     * @return CUBE32_OK on success
      */
     cube32_result_t setPrismMode(bool enable, uint16_t effective_rotation = 0xFFFF);
 
@@ -314,12 +313,12 @@ public:
     bool isMirrorY() const { return (m_config.rotation == 90 || m_config.rotation == 180); }
 
     // Singleton - no copy/move
-    ST7789Display(const ST7789Display&) = delete;
-    ST7789Display& operator=(const ST7789Display&) = delete;
+    ST7796Display(const ST7796Display&) = delete;
+    ST7796Display& operator=(const ST7796Display&) = delete;
 
 private:
-    ST7789Display() = default;
-    ~ST7789Display();
+    ST7796Display() = default;
+    ~ST7796Display();
 
     cube32_result_t initBacklight();
     cube32_result_t initReset();
@@ -327,9 +326,20 @@ private:
     cube32_result_t initPanel();
     void autoDisplayOn();  ///< Turn on display after first successful draw (once only)
 
+    /** Signal completion of a queued SPI color transfer. */
+    static bool onColorTransDone(esp_lcd_panel_io_handle_t io,
+                                 esp_lcd_panel_io_event_data_t* edata,
+                                 void* user_ctx);
+
+    /** Queue a color transfer and wait before the caller may reuse its buffer. */
+    esp_err_t drawBitmapAndWait(uint16_t x_start, uint16_t y_start,
+                                uint16_t x_end, uint16_t y_end,
+                                const void* data);
+
     esp_lcd_panel_handle_t m_panel_handle = nullptr;
     esp_lcd_panel_io_handle_t m_io_handle = nullptr;
-    cube32_st7789_config_t m_config = {};
+    void* m_trans_sem = nullptr;  ///< SemaphoreHandle_t; opaque to keep FreeRTOS out of this header
+    cube32_st7796_config_t m_config = {};
     uint16_t m_effective_width = 0;   ///< Effective width after rotation
     uint16_t m_effective_height = 0;  ///< Effective height after rotation
     bool m_initialized = false;
@@ -341,4 +351,4 @@ private:
 
 #endif // __cplusplus
 
-#endif // CUBE32_DRIVERS_DISPLAY_ST7789_H
+#endif // CUBE32_DRIVERS_DISPLAY_ST7796_H

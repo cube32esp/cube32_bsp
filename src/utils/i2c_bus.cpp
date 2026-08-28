@@ -6,9 +6,25 @@
 #include "utils/i2c_bus.h"
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <freertos/semphr.h>
 
 static const char* TAG = "cube32_i2c";
+
+// Probe robustness: when several I2C peripherals share the bus (e.g. the
+// A7670 modem module adds an IO expander at 0x22), the extra bus load can
+// cause the IDF master to occasionally return ESP_ERR_TIMEOUT on a probe
+// instead of a clean NACK. Retry transient timeouts so a device is not
+// missed, but do not retry ESP_ERR_NOT_FOUND (a genuine "device absent").
+//
+// IMPORTANT: after a probe times out the IDF master driver leaves its
+// hardware FSM / internal state desynced. Re-probing without recovering the
+// bus makes every subsequent probe fail instantly. So each retry must be
+// preceded by i2c_master_bus_reset(). The per-attempt timeout must also stay
+// generous (100 ms) so a healthy first probe never spuriously times out.
+static constexpr int    kProbeTimeoutMs    = 100;  // per-attempt timeout
+static constexpr int    kProbeMaxAttempts  = 3;    // total attempts on timeout
+static constexpr int    kProbeRetryDelayMs = 5;    // settle delay between retries
 
 namespace cube32 {
 
@@ -96,12 +112,43 @@ cube32_result_t I2CBus::probe(uint8_t addr) {
         return CUBE32_NOT_INITIALIZED;
     }
 
-    esp_err_t ret = i2c_master_probe(m_bus_handle, addr, pdMS_TO_TICKS(100));
+    // Silence the IDF driver's ERROR-level "probe device timeout" log during
+    // our retry loop; a transient timeout here is expected and handled.
+    esp_log_level_t prev_level = esp_log_level_get("i2c.master");
+    esp_log_level_set("i2c.master", ESP_LOG_NONE);
+
+    esp_err_t ret = ESP_ERR_NOT_FOUND;
+    for (int attempt = 0; attempt < kProbeMaxAttempts; attempt++) {
+        // i2c_master_probe expects xfer_timeout_ms in milliseconds, not ticks.
+        ret = i2c_master_probe(m_bus_handle, addr, kProbeTimeoutMs);
+
+        // Device answered, or gave a clean NACK (truly absent) — done.
+        if (ret == ESP_OK || ret == ESP_ERR_NOT_FOUND) {
+            break;
+        }
+
+        // Transient bus condition (typically ESP_ERR_TIMEOUT under heavy bus
+        // load). The driver leaves its FSM desynced after a timeout, so reset
+        // the bus to recover it before trying again — otherwise every later
+        // probe fails instantly.
+        if (attempt + 1 < kProbeMaxAttempts) {
+            ESP_LOGD(TAG, "Probe 0x%02X attempt %d failed (%s), resetting bus",
+                     addr, attempt + 1, esp_err_to_name(ret));
+            i2c_master_bus_reset(m_bus_handle);
+            vTaskDelay(pdMS_TO_TICKS(kProbeRetryDelayMs));
+        }
+    }
+
+    esp_log_level_set("i2c.master", prev_level);
+
     if (ret == ESP_OK) {
         return CUBE32_OK;
     } else if (ret == ESP_ERR_NOT_FOUND) {
         return CUBE32_NOT_FOUND;
     }
+
+    ESP_LOGW(TAG, "Probe 0x%02X failed after %d attempts: %s",
+             addr, kProbeMaxAttempts, esp_err_to_name(ret));
     return esp_err_to_cube32(ret);
 }
 

@@ -25,24 +25,10 @@ menu "CUBE32 Board Configuration"
             default y
             help
                 Enable display driver initialization.
-
-        choice CUBE32_DISPLAY_BOARD_MODEL
-            prompt "Display Board Model"
-            default CUBE32_DISPLAY_CUBE_TFT_TOUCH_154
-            depends on CUBE32_DISPLAY_ENABLED
-            help
-                Select the display board model.
-
-            config CUBE32_DISPLAY_CUBE_TFT_TOUCH_154
-                bool "CUBE_TFT_TOUCH_154 (240x240)"
-                help
-                    1.54 inch TFT display with touch, 240x240 resolution.
-
-            config CUBE32_DISPLAY_CUBE_TFT_TOUCH_200
-                bool "CUBE_TFT_TOUCH_200 (240x320)"
-                help
-                    2.0 inch TFT display with touch, 240x320 resolution.
-        endchoice
+                The display board model (resolution, rotation, touch chip) is
+                auto-detected at boot from the touch controller's I2C address
+                — see CUBE32_DISPLAY_MODEL_TABLE in cube32_config.h. No display
+                is initialized if no known touch address is found.
 
         config CUBE32_LVGL_ENABLED
             bool "Enable LVGL"
@@ -423,7 +409,7 @@ menu "CUBE32 Board Configuration"
 
         choice CUBE32_MODEM_CONNECTION
             prompt "Modem Connection Type"
-            default CUBE32_MODEM_CONNECTION_USB
+            default CUBE32_MODEM_CONNECTION_UART
             depends on CUBE32_MODEM_ENABLED
             help
                 Select how the modem is connected to ESP32.
@@ -473,7 +459,7 @@ menu "CUBE32 Board Configuration"
 
         config CUBE32_MODEM_NETWORK_TIMEOUT_MS
             int "Network Registration Timeout (ms)"
-            default 60000
+            default 120000
             range 10000 300000
             depends on CUBE32_MODEM_ENABLED
             help
@@ -572,7 +558,7 @@ menu "CUBE32 Board Configuration"
 
         choice CUBE32_SERVO1_ROTATION
             prompt "Servo 1 Max Rotation"
-            default CUBE32_SERVO1_ROTATION_90
+            default CUBE32_SERVO1_ROTATION_180
             depends on CUBE32_SERVO_ENABLED
             help
                 Maximum rotation range for Servo 1.
@@ -668,7 +654,7 @@ menu "CUBE32 Board Configuration"
 
         config CUBE32_ROBOT_HEAD_PAN_CHANNEL
             int "Pan Servo Channel (horizontal)"
-            default 0
+            default 1
             range 0 1
             depends on CUBE32_ROBOT_HEAD_ENABLED
             help
@@ -676,7 +662,7 @@ menu "CUBE32 Board Configuration"
 
         config CUBE32_ROBOT_HEAD_TILT_CHANNEL
             int "Tilt Servo Channel (vertical)"
-            default 1
+            default 0
             range 0 1
             depends on CUBE32_ROBOT_HEAD_ENABLED
             help

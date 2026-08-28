@@ -35,6 +35,7 @@ typedef enum {
     CUBE32_TOUCH_IC_NONE = 0,    ///< No touch IC
     CUBE32_TOUCH_IC_CST816,      ///< CST816S (1.54" display)
     CUBE32_TOUCH_IC_FT6336,      ///< FT6336/FT5x06 (2.0" display)
+    CUBE32_TOUCH_IC_GT911,       ///< GT911 (4.0" 320x320 display)
 } cube32_touch_ic_t;
 
 /**
@@ -76,51 +77,36 @@ typedef struct {
     
     // Touch IC type (auto-detected if set to NONE)
     cube32_touch_ic_t ic_type;      ///< Touch IC type
+
+    // I2C address override (0 = use the IC's built-in default address).
+    // Needed for GT911, whose address is runtime-selected (0x5D or 0x14)
+    // via an INT-pin strap at power-on — see hw_manifest.cpp detection.
+    uint8_t i2c_addr;
 } cube32_touch_config_t;
 
 /**
  * @brief Default touch configuration using pins from cube32_config.h
  *        Rotation starts at 0 (base state) - LVGL will handle rotation
+ *
+ * NOTE: h_res/v_res/ic_type here are inert fallback placeholders. The real
+ * values are auto-detected from the touch controller's I2C address (see
+ * CUBE32_DISPLAY_MODEL_TABLE in cube32_config.h) and set explicitly by the
+ * caller before begin() — e.g. see cube32.cpp.
  */
 #define CUBE32_TOUCH_ROTATION_DEFAULT 0
 
-#if defined(CONFIG_CUBE32_DISPLAY_CUBE_TFT_TOUCH_154)
 #define CUBE32_TOUCH_CONFIG_DEFAULT() { \
     .rst_pin = CUBE32_TOUCH_RST_PIN, \
     .int_pin = CUBE32_TOUCH_INT_PIN, \
-    .h_res = 240, \
-    .v_res = 240, \
+    .h_res = CUBE32_LCD_H_RES_FALLBACK, \
+    .v_res = CUBE32_LCD_V_RES_FALLBACK, \
     .rotation = CUBE32_TOUCH_ROTATION_DEFAULT, \
     .swap_xy = false, \
     .mirror_x = false, \
     .mirror_y = false, \
-    .ic_type = CUBE32_TOUCH_IC_CST816, \
+    .ic_type = CUBE32_TOUCH_IC_NONE, \
+    .i2c_addr = 0, \
 }
-#elif defined(CONFIG_CUBE32_DISPLAY_CUBE_TFT_TOUCH_200)
-#define CUBE32_TOUCH_CONFIG_DEFAULT() { \
-    .rst_pin = CUBE32_TOUCH_RST_PIN, \
-    .int_pin = CUBE32_TOUCH_INT_PIN, \
-    .h_res = 240, \
-    .v_res = 320, \
-    .rotation = CUBE32_TOUCH_ROTATION_DEFAULT, \
-    .swap_xy = false, \
-    .mirror_x = false, \
-    .mirror_y = false, \
-    .ic_type = CUBE32_TOUCH_IC_FT6336, \
-}
-#else
-#define CUBE32_TOUCH_CONFIG_DEFAULT() { \
-    .rst_pin = CUBE32_TOUCH_RST_PIN, \
-    .int_pin = CUBE32_TOUCH_INT_PIN, \
-    .h_res = 240, \
-    .v_res = 240, \
-    .rotation = CUBE32_TOUCH_ROTATION_DEFAULT, \
-    .swap_xy = false, \
-    .mirror_x = false, \
-    .mirror_y = false, \
-    .ic_type = CUBE32_TOUCH_IC_CST816, \
-}
-#endif
 
 // ============================================================================
 // C Interface
@@ -309,6 +295,7 @@ private:
 
     cube32_result_t initCST816();
     cube32_result_t initFT6336();
+    cube32_result_t initGT911();
 
     esp_lcd_touch_handle_t m_touch_handle = nullptr;
     esp_lcd_panel_io_handle_t m_io_handle = nullptr;

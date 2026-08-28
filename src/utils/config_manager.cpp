@@ -4,6 +4,7 @@
  */
 
 #include "utils/config_manager.h"
+#include "utils/i2c_bus.h"
 #include "cube32_config.h"
 
 #include <cstring>
@@ -31,23 +32,38 @@ cube32_cfg_t* cube32_cfg_mut(void)
 
 /* ============================================================================
  * Display-model helpers
+ *
+ * The display board model is auto-detected from the touch controller's I2C
+ * address (see CUBE32_DISPLAY_MODEL_TABLE in cube32_config.h). This performs
+ * its own lightweight probe of just the known touch addresses, independent
+ * of the full hardware manifest scan, so it works regardless of call order
+ * relative to cube32_hw_manifest_scan().
  * ============================================================================ */
 
-uint8_t cube32_cfg_compiled_display_model_id(void)
+static const cube32_display_model_info_t* detect_display_model(void)
 {
-#if defined(CONFIG_CUBE32_DISPLAY_CUBE_TFT_TOUCH_154)
-    return 1;
-#elif defined(CONFIG_CUBE32_DISPLAY_CUBE_TFT_TOUCH_200)
-    return 2;
-#else
-    return 0;   /* unknown / display disabled */
-#endif
+    for (size_t i = 0; i < CUBE32_DISPLAY_MODEL_COUNT; i++) {
+        if (cube32_i2c_probe(CUBE32_DISPLAY_MODEL_TABLE[i].touch_i2c_addr) == CUBE32_OK) {
+            return &CUBE32_DISPLAY_MODEL_TABLE[i];
+        }
+    }
+    return NULL;
+}
+
+uint8_t cube32_cfg_detected_display_model_id(void)
+{
+    const cube32_display_model_info_t* model = detect_display_model();
+    return model ? model->model_id : CUBE32_DISPLAY_MODEL_UNKNOWN_ID;
 }
 
 uint16_t cube32_cfg_default_rotation(uint8_t display_model_id)
 {
-    (void)display_model_id;
-    return CUBE32_LCD_DEFAULT_ROTATION;
+    for (size_t i = 0; i < CUBE32_DISPLAY_MODEL_COUNT; i++) {
+        if (CUBE32_DISPLAY_MODEL_TABLE[i].model_id == display_model_id) {
+            return CUBE32_DISPLAY_MODEL_TABLE[i].default_rotation;
+        }
+    }
+    return CUBE32_LCD_ROTATION_FALLBACK;
 }
 
 /* ============================================================================
@@ -59,7 +75,7 @@ static void cfg_apply_defaults(cube32_cfg_t* cfg)
     memset(cfg, 0, sizeof(*cfg));
 
     /* Display */
-    cfg->display_model_id = cube32_cfg_compiled_display_model_id();
+    cfg->display_model_id = cube32_cfg_detected_display_model_id();
     cfg->display_rotation = cube32_cfg_default_rotation(cfg->display_model_id);
     cfg->display_prism    = false;
 
@@ -165,10 +181,10 @@ cube32_result_t cube32_cfg_load(void)
     uint8_t stored_model = 0;
     bool model_changed = false;
     if (nvs_read_u8(h, CUBE32_CFG_KEY_DISP_MODEL, &stored_model) == ESP_OK) {
-        uint8_t compiled_model = cube32_cfg_compiled_display_model_id();
-        if (stored_model != compiled_model) {
+        uint8_t detected_model = cube32_cfg_detected_display_model_id();
+        if (stored_model != detected_model) {
             ESP_LOGW(TAG, "Display model changed (%u → %u) — resetting model-dependent defaults",
-                     stored_model, compiled_model);
+                     stored_model, detected_model);
             model_changed = true;
             /* rotation keeps the new default already set above */
         }
@@ -239,7 +255,7 @@ cube32_result_t cube32_cfg_load(void)
 
     /* If model changed, persist the new model id + reset values immediately */
     if (model_changed) {
-        s_cfg.display_model_id = cube32_cfg_compiled_display_model_id();
+        s_cfg.display_model_id = cube32_cfg_detected_display_model_id();
         cube32_cfg_save();
     }
 
@@ -318,18 +334,34 @@ cube32_result_t cube32_cfg_save(void)
 
 cube32_result_t cube32_cfg_reset(void)
 {
-    ESP_LOGW(TAG, "Resetting all configuration to defaults");
-    cfg_apply_defaults(&s_cfg);
-    s_cfg.loaded = true;
+    char saved_ble_device_name[sizeof(s_cfg.ble_device_name)];
+    strncpy(saved_ble_device_name, s_cfg.ble_device_name, sizeof(saved_ble_device_name) - 1);
+    saved_ble_device_name[sizeof(saved_ble_device_name) - 1] = '\0';
 
-    /* Erase the namespace and re-save defaults */
+    ESP_LOGW(TAG, "Resetting configuration to defaults (preserving BLE name)");
+
+    /* Erase the namespace before writing the reset configuration. */
     nvs_handle_t h;
     esp_err_t err = nvs_open(CUBE32_CFG_NVS_NAMESPACE, NVS_READWRITE, &h);
-    if (err == ESP_OK) {
-        nvs_erase_all(h);
-        nvs_commit(h);
-        nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_open(RW) failed during reset: %s", esp_err_to_name(err));
+        return CUBE32_ERROR;
     }
+
+    err = nvs_erase_all(h);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to erase configuration: %s", esp_err_to_name(err));
+        return CUBE32_ERROR;
+    }
+
+    cfg_apply_defaults(&s_cfg);
+    strncpy(s_cfg.ble_device_name, saved_ble_device_name, sizeof(s_cfg.ble_device_name) - 1);
+    s_cfg.ble_device_name[sizeof(s_cfg.ble_device_name) - 1] = '\0';
+    s_cfg.loaded = true;
 
     return cube32_cfg_save();
 }
