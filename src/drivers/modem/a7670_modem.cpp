@@ -741,8 +741,8 @@ cube32_result_t A7670Modem::initUSB() {
 
     // Try to sync with retries
     bool synced = false;
-    for (int retry = 0; retry < 5; retry++) {
-        ESP_LOGI(TAG, "Sync attempt %d/5...", retry + 1);
+    for (int retry = 0; retry < CUBE32_MODEM_USB_SYNC_RETRY_COUNT; retry++) {
+        ESP_LOGI(TAG, "Sync attempt %d/%d...", retry + 1, CUBE32_MODEM_USB_SYNC_RETRY_COUNT);
         if (sync() == CUBE32_OK) {
             synced = true;
             break;
@@ -883,7 +883,9 @@ void A7670Modem::requestRecovery() {
 void A7670Modem::recoveryTask(void* arg) {
     A7670Modem* modem = static_cast<A7670Modem*>(arg);
 
-    ESP_LOGW(TAG, "Recovery task started");
+    uint32_t attempt = ++modem->m_recovery_attempt_count;
+    ESP_LOGW(TAG, "Recovery task started (attempt %lu/%d)",
+             (unsigned long)attempt, CUBE32_MODEM_USB_MAX_RECOVERY_ATTEMPTS);
 
     // Brief delay to let any in-flight USB transfers settle
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -893,22 +895,40 @@ void A7670Modem::recoveryTask(void* arg) {
         goto done;
     }
 
-    // Stage 1: Try to toggle mode (data → command → data)
+    // Stage 1: Try to toggle mode (data → command → data), retried a few times
+    // since a marginal USB link can make a single toggle attempt unreliable too.
     if (modem->m_state.load() == ModemState::DATA_MODE) {
-        ESP_LOGI(TAG, "Recovery stage 1: toggling mode");
-        if (modem->setCommandMode() == CUBE32_OK) {
-            vTaskDelay(pdMS_TO_TICKS(500));
-            if (!modem->m_shutting_down && modem->setDataMode() == CUBE32_OK) {
-                ESP_LOGI(TAG, "Recovery stage 1 succeeded");
-                goto done;
+        for (int i = 0; i < CUBE32_MODEM_USB_RECOVERY_TOGGLE_RETRIES; i++) {
+            ESP_LOGI(TAG, "Recovery stage 1: toggling mode (try %d/%d)",
+                     i + 1, CUBE32_MODEM_USB_RECOVERY_TOGGLE_RETRIES);
+            if (modem->setCommandMode() == CUBE32_OK) {
+                vTaskDelay(pdMS_TO_TICKS(500));
+                if (!modem->m_shutting_down && modem->setDataMode() == CUBE32_OK) {
+                    ESP_LOGI(TAG, "Recovery stage 1 succeeded");
+                    modem->m_recovery_attempt_count = 0;
+                    goto done;
+                }
             }
+            if (modem->m_shutting_down) goto done;
+            vTaskDelay(pdMS_TO_TICKS(500));
         }
     }
 
     if (modem->m_shutting_down) goto done;
 
-    // Stage 2: Reset modem to command mode as a fallback
-    ESP_LOGW(TAG, "Recovery stage 2: resetting to command mode");
+    // Stage 2 (escalation): after repeated recovery cycles, a mode toggle alone
+    // is no longer helping — try an AT-level modem reset before falling back.
+    if (attempt >= CUBE32_MODEM_USB_MAX_RECOVERY_ATTEMPTS) {
+        ESP_LOGE(TAG, "Recovery stage 2: %lu consecutive cycles failed, attempting AT reset "
+                       "(persistent USB errors usually indicate a marginal USB signal/cabling issue)",
+                 (unsigned long)attempt);
+        modem->reset();
+        modem->m_recovery_attempt_count = 0;
+        if (modem->m_shutting_down) goto done;
+    }
+
+    // Stage 3: Reset modem to command mode as a fallback
+    ESP_LOGW(TAG, "Recovery stage 3: resetting to command mode");
     if (modem->m_dce) {
         modem->lock();
         modem->m_dce->set_mode(esp_modem::modem_mode::COMMAND_MODE);
@@ -987,6 +1007,7 @@ cube32_result_t A7670Modem::end() {
     m_network_ready = false;
     m_usb_error_count = 0;
     m_recovery_pending = false;
+    m_recovery_attempt_count = 0;
     
     unlock();
 
@@ -1222,6 +1243,7 @@ cube32_result_t A7670Modem::setDataMode() {
         setState(ModemState::DATA_MODE);
         m_ppp_connected = true;
         m_usb_error_count = 0;  // Reset error counter on successful mode switch
+        m_recovery_attempt_count = 0;
         xEventGroupSetBits(m_event_group, MODEM_PPP_CONNECTED_BIT);
         xEventGroupClearBits(m_event_group, MODEM_PPP_DISCONNECTED_BIT);
         ESP_LOGI(TAG, "Data mode active");

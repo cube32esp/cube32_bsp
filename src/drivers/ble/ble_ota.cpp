@@ -13,6 +13,7 @@
 #include <cinttypes>
 
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp_random.h>
 #include <esp_ota_ops.h>
@@ -24,6 +25,7 @@
 #include <sys/time.h>
 #include "utils/config_manager.h"
 #include "utils/hw_manifest.h"
+#include "utils/log_capture.h"
 
 #ifdef CONFIG_CUBE32_PMU_ENABLED
 #include "drivers/pmu/axp2101.h"
@@ -65,6 +67,7 @@ static const char *TAG = "ble_ota";
 #define BLE_OTA_PROGRESS_UUID           0x8021
 #define BLE_OTA_COMMAND_UUID            0x8022
 #define BLE_OTA_CUSTOMER_UUID           0x8023
+#define BLE_OTA_LOG_DATA_UUID           0x8024
 
 // Device Information Service
 #define BLE_DIS_SERVICE_UUID            0x180A
@@ -83,6 +86,7 @@ static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t s_customer_char_handle = 0;
 static uint16_t s_command_char_handle = 0;
 static uint16_t s_progress_char_handle = 0;
+static uint16_t s_log_data_char_handle = 0;
 static bool s_ota_in_progress = false;
 // NimBLE NPL callout for deferred advertising restart after disconnect.
 // Runs in the NimBLE host task context (adequate stack), not in Tmr Svc.
@@ -105,6 +109,23 @@ static const char* s_manufacturer = "CUBE32";
 // ============================================================================
 // Forward Declarations
 // ============================================================================
+
+// Live log-stream task state (created lazily on first LOG_STREAM_START)
+static TaskHandle_t s_log_stream_task = nullptr;
+static volatile bool s_log_stream_task_running = false;
+
+// Boot-log chunks must not be notified from a GATT write callback: NimBLE
+// holds its host mutex while invoking the callback. A dedicated sender task
+// performs the notification after that lock has been released.
+typedef struct {
+    uint32_t offset;
+    uint16_t requested_len;
+    uint16_t mtu;
+} log_chunk_request_t;
+static QueueHandle_t s_log_chunk_queue = nullptr;
+static TaskHandle_t s_log_chunk_task = nullptr;
+static volatile bool s_log_chunk_task_running = false;
+static uint8_t* s_log_chunk_buffer = nullptr;
 
 static int ble_gap_event_handler(struct ble_gap_event *event, void *arg);
 static int ble_gatt_handler(uint16_t conn_handle, uint16_t attr_handle,
@@ -133,6 +154,7 @@ static ble_uuid16_t uuid_ota_recv_fw = BLE_UUID16_INIT(BLE_OTA_RECV_FW_UUID);
 static ble_uuid16_t uuid_ota_progress = BLE_UUID16_INIT(BLE_OTA_PROGRESS_UUID);
 static ble_uuid16_t uuid_ota_command = BLE_UUID16_INIT(BLE_OTA_COMMAND_UUID);
 static ble_uuid16_t uuid_ota_customer = BLE_UUID16_INIT(BLE_OTA_CUSTOMER_UUID);
+static ble_uuid16_t uuid_ota_log_data = BLE_UUID16_INIT(BLE_OTA_LOG_DATA_UUID);
 
 // ============================================================================
 // GATT Service Definitions
@@ -248,6 +270,18 @@ static const struct ble_gatt_chr_def ota_chars[] = {
                  BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_INDICATE,
         .min_key_size = 0,
         .val_handle = &s_customer_char_handle,
+        .cpfd = NULL,
+    },
+    {
+        // Log Data Characteristic — boot-log chunks + live stream lines,
+        // runs in parallel with OTA/command traffic (own notify channel)
+        .uuid = &uuid_ota_log_data.u,
+        .access_cb = ble_gatt_handler,
+        .arg = NULL,
+        .descriptors = NULL,
+        .flags = BLE_GATT_CHR_F_NOTIFY,
+        .min_key_size = 0,
+        .val_handle = &s_log_data_char_handle,
         .cpfd = NULL,
     },
     { .uuid = NULL } // End
@@ -926,6 +960,14 @@ void BleOta::onDisconnected(uint16_t conn_handle, int reason)
     s_ota_received_len = 0;
     m_status.ota_progress = 0;
     
+    // Safety net: don't leave the live-log stream task spinning against a
+    // dead connection.
+    if (m_log_stream_active) {
+        cube32_log_capture_stream_enable(false, ESP_LOG_NONE);
+        s_log_stream_task_running = false;
+        m_log_stream_active = false;
+    }
+    
     ESP_LOGI(TAG, "Client disconnected: reason=0x%02X", reason);
     
     if (m_conn_callback) {
@@ -1087,6 +1129,22 @@ void BleOta::processCommand(const uint8_t* data, size_t len)
         
     case CUBE32_BLE_CMD_OTA_ABORT:
         handleOtaAbort();
+        break;
+        
+    case CUBE32_BLE_CMD_LOG_GET_INFO:
+        handleLogGetInfo();
+        break;
+        
+    case CUBE32_BLE_CMD_LOG_GET_BOOT_CHUNK:
+        handleLogGetBootChunk(data + 1, len - 1);
+        break;
+        
+    case CUBE32_BLE_CMD_LOG_STREAM_START:
+        handleLogStreamStart(data + 1, len - 1);
+        break;
+        
+    case CUBE32_BLE_CMD_LOG_STREAM_STOP:
+        handleLogStreamStop();
         break;
         
     default:
@@ -1982,6 +2040,280 @@ void BleOta::cleanupOta()
     m_update_partition = nullptr;
 }
 
+// ============================================================================
+// Boot/Runtime Log over BLE
+// ============================================================================
+
+// Max payload we'll ever pack into a single Log Data notification, bounded
+// well under the 517-byte NimBLE MTU ceiling.
+#define BLE_OTA_LOG_NOTIFY_MAX_LEN   512
+
+cube32_result_t BleOta::sendLogChunk(uint32_t offset, const uint8_t* data, size_t len)
+{
+    if (!m_initialized || !m_status.is_connected || s_log_data_char_handle == 0) {
+        return CUBE32_ERROR;
+    }
+    // header: [type(1)][offset(4)][len(2)]
+    if (len + 7 > BLE_OTA_LOG_NOTIFY_MAX_LEN) {
+        return CUBE32_INVALID_ARG;
+    }
+
+    // Reused across calls (this is only ever invoked from the single
+    // boot-log sender task) so a long download doesn't churn the PSRAM
+    // allocator with a malloc/free pair per chunk.
+    static uint8_t* s_frame_buffer = nullptr;
+    if (!s_frame_buffer) {
+        s_frame_buffer = (uint8_t*)heap_caps_malloc(BLE_OTA_LOG_NOTIFY_MAX_LEN,
+                                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_frame_buffer) {
+            return CUBE32_NO_MEM;
+        }
+    }
+    uint8_t* frame = s_frame_buffer;
+    size_t idx = 0;
+    frame[idx++] = CUBE32_BLE_LOG_FRAME_CHUNK;
+    frame[idx++] = (uint8_t)((offset >> 0) & 0xFF);
+    frame[idx++] = (uint8_t)((offset >> 8) & 0xFF);
+    frame[idx++] = (uint8_t)((offset >> 16) & 0xFF);
+    frame[idx++] = (uint8_t)((offset >> 24) & 0xFF);
+    frame[idx++] = (uint8_t)(len & 0xFF);
+    frame[idx++] = (uint8_t)((len >> 8) & 0xFF);
+    if (len > 0 && data) {
+        memcpy(&frame[idx], data, len);
+        idx += len;
+    }
+
+    // Suppress capture/streaming of anything logged inside this send path
+    // (e.g. this driver's own ESP_LOGD/W below) to avoid a feedback loop.
+    cube32_log_capture_suppress_begin();
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(frame, idx);
+    if (!om) {
+        cube32_log_capture_suppress_end();
+        ESP_LOGE(TAG, "Failed to allocate mbuf for log chunk");
+        return CUBE32_NO_MEM;
+    }
+    int rc = ble_gatts_notify_custom(s_conn_handle, s_log_data_char_handle, om);
+    cube32_log_capture_suppress_end();
+    if (rc != 0) {
+        ESP_LOGW(TAG, "Failed to send log chunk notification: %d", rc);
+        return CUBE32_IO_ERROR;
+    }
+    return CUBE32_OK;
+}
+
+cube32_result_t BleOta::sendLogLine(const uint8_t* data, size_t len)
+{
+    if (!m_initialized || !m_status.is_connected || s_log_data_char_handle == 0) {
+        return CUBE32_ERROR;
+    }
+
+    // Reused across calls (only ever invoked from the single live-stream
+    // task) to keep this off the task's small stack.
+    static uint8_t* s_frame_buffer = nullptr;
+    if (!s_frame_buffer) {
+        s_frame_buffer = (uint8_t*)heap_caps_malloc(BLE_OTA_LOG_NOTIFY_MAX_LEN,
+                                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_frame_buffer) {
+            return CUBE32_NO_MEM;
+        }
+    }
+    uint8_t* frame = s_frame_buffer;
+    size_t max_payload = BLE_OTA_LOG_NOTIFY_MAX_LEN - 1;
+    size_t copy_len = (len < max_payload) ? len : max_payload;
+    frame[0] = CUBE32_BLE_LOG_FRAME_LIVE_LINE;
+    if (copy_len > 0 && data) {
+        memcpy(&frame[1], data, copy_len);
+    }
+
+    cube32_log_capture_suppress_begin();
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(frame, copy_len + 1);
+    if (!om) {
+        cube32_log_capture_suppress_end();
+        return CUBE32_NO_MEM;
+    }
+    int rc = ble_gatts_notify_custom(s_conn_handle, s_log_data_char_handle, om);
+    cube32_log_capture_suppress_end();
+    if (rc != 0) {
+        return CUBE32_IO_ERROR;
+    }
+    return CUBE32_OK;
+}
+
+void BleOta::handleLogGetInfo()
+{
+    uint32_t total_size = (uint32_t)cube32_log_capture_get_boot_log_size();
+    uint32_t dropped = cube32_log_capture_get_dropped_stream_count();
+
+    uint8_t resp[10];
+    resp[0] = (uint8_t)((total_size >> 0) & 0xFF);
+    resp[1] = (uint8_t)((total_size >> 8) & 0xFF);
+    resp[2] = (uint8_t)((total_size >> 16) & 0xFF);
+    resp[3] = (uint8_t)((total_size >> 24) & 0xFF);
+    resp[4] = cube32_log_capture_is_boot_complete() ? 1 : 0;
+    resp[5] = cube32_log_capture_is_frozen() ? 1 : 0;
+    resp[6] = (uint8_t)((dropped >> 0) & 0xFF);
+    resp[7] = (uint8_t)((dropped >> 8) & 0xFF);
+    resp[8] = (uint8_t)((dropped >> 16) & 0xFF);
+    resp[9] = (uint8_t)((dropped >> 24) & 0xFF);
+
+    // Metadata-only — must NOT freeze the boot-log buffer.
+    sendResponse(CUBE32_BLE_CMD_LOG_GET_INFO, CUBE32_BLE_RESP_OK, resp, sizeof(resp));
+}
+
+void BleOta::handleLogGetBootChunk(const uint8_t* data, size_t len)
+{
+    if (len < 6) {
+        return;
+    }
+
+    uint32_t offset = (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+                       ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+    uint16_t requested_len = (uint16_t)data[4] | ((uint16_t)data[5] << 8);
+
+    if (!s_log_chunk_queue) {
+        s_log_chunk_queue = xQueueCreate(4, sizeof(log_chunk_request_t));
+        if (!s_log_chunk_queue) {
+            ESP_LOGE(TAG, "Failed to create boot-log chunk queue");
+            return;
+        }
+    }
+
+    log_chunk_request_t request = {};
+    request.offset = offset;
+    request.requested_len = requested_len;
+    request.mtu = m_mtu;
+
+    if (xQueueSend(s_log_chunk_queue, &request, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "Boot-log chunk queue full");
+        return;
+    }
+
+    if (s_log_chunk_task == nullptr) {
+        s_log_chunk_buffer = (uint8_t*)heap_caps_malloc(BLE_OTA_LOG_NOTIFY_MAX_LEN - 7,
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_log_chunk_buffer) {
+            ESP_LOGE(TAG, "Failed to allocate boot-log chunk buffer");
+            return;
+        }
+        s_log_chunk_task_running = true;
+        BaseType_t rc = xTaskCreate([](void*) {
+            log_chunk_request_t pending;
+            while (s_log_chunk_task_running) {
+                if (xQueueReceive(s_log_chunk_queue, &pending, pdMS_TO_TICKS(200)) == pdTRUE) {
+                    cube32::BleOta& ble_ota = cube32::BleOta::instance();
+                    cube32_log_capture_freeze_boot_log();
+
+                    size_t total = cube32_log_capture_get_boot_log_size();
+                    size_t remaining = (pending.offset < total) ? (total - pending.offset) : 0;
+                    size_t max_payload = (pending.mtu > 10)
+                        ? ((size_t)pending.mtu - 3 - 7) : 20;
+                    if (max_payload > (BLE_OTA_LOG_NOTIFY_MAX_LEN - 7)) {
+                        max_payload = BLE_OTA_LOG_NOTIFY_MAX_LEN - 7;
+                    }
+
+                    size_t chunk_len = pending.requested_len;
+                    if (chunk_len == 0 || chunk_len > max_payload) {
+                        chunk_len = max_payload;
+                    }
+                    if (chunk_len > remaining) {
+                        chunk_len = remaining;
+                    }
+
+                    size_t actual = (chunk_len > 0)
+                        ? cube32_log_capture_read_boot_log(pending.offset, s_log_chunk_buffer, chunk_len) : 0;
+                    cube32_result_t result = ble_ota.sendLogChunk(pending.offset, s_log_chunk_buffer, actual);
+                    ble_ota.sendResponse(CUBE32_BLE_CMD_LOG_GET_BOOT_CHUNK,
+                                         result == CUBE32_OK ? CUBE32_BLE_RESP_OK : CUBE32_BLE_RESP_ERROR,
+                                         nullptr, 0);
+
+                    // Evidence for right-sizing the stack below instead of
+                    // guessing — logs once per chunk at DEBUG level.
+                    ESP_LOGD(TAG, "cube32_log_chunk stack headroom: %u bytes",
+                             (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+                }
+            }
+            s_log_chunk_task = nullptr;
+            vTaskDelete(nullptr);
+        // Measured peak usage ~2196 bytes (6144-byte stack, 3948-byte
+        // high-water mark); sized with ~40% margin. Watch the per-chunk
+        // DEBUG log above if this ever needs re-tuning.
+        }, "cube32_log_chunk", 3072, nullptr, tskIDLE_PRIORITY + 2, &s_log_chunk_task);
+        if (rc != pdPASS) {
+            s_log_chunk_task_running = false;
+            heap_caps_free(s_log_chunk_buffer);
+            s_log_chunk_buffer = nullptr;
+            log_chunk_request_t discarded;
+            xQueueReceive(s_log_chunk_queue, &discarded, 0);
+            s_log_chunk_task = nullptr;
+            ESP_LOGE(TAG, "Failed to create boot-log chunk task");
+            return;
+        }
+    }
+}
+
+// Drains the live-log queue and forwards lines to the connected BLE client.
+// Runs until s_log_stream_task_running is cleared (LOG_STREAM_STOP or disconnect).
+static void logStreamTaskFn(void* /*arg*/)
+{
+    // Heap/PSRAM-backed (not a stack array) — this task's stack only needs
+    // to cover ble_gatts_notify_custom()'s NimBLE call depth.
+    uint8_t* buf = (uint8_t*)heap_caps_malloc(BLE_OTA_LOG_NOTIFY_MAX_LEN - 1,
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    size_t out_len = 0;
+
+    while (buf && s_log_stream_task_running) {
+        if (cube32_log_capture_stream_pop(buf, BLE_OTA_LOG_NOTIFY_MAX_LEN - 1, &out_len, pdMS_TO_TICKS(200))) {
+            if (out_len > 0) {
+                cube32::BleOta::instance().sendLogLine(buf, out_len);
+                ESP_LOGD(TAG, "cube32_log_stream stack headroom: %u bytes",
+                         (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+            }
+        }
+    }
+
+    heap_caps_free(buf);
+    s_log_stream_task = nullptr;
+    vTaskDelete(nullptr);
+}
+
+void BleOta::handleLogStreamStart(const uint8_t* data, size_t len)
+{
+    esp_log_level_t level = ESP_LOG_WARN;
+    if (len >= 1 && data[0] <= ESP_LOG_VERBOSE) {
+        level = (esp_log_level_t)data[0];
+    }
+
+    cube32_log_capture_stream_enable(true, level);
+    m_log_stream_active = true;
+
+    if (s_log_stream_task == nullptr) {
+        s_log_stream_task_running = true;
+        BaseType_t rc = xTaskCreate(logStreamTaskFn, "cube32_log_stream", 3072,
+                                     nullptr, tskIDLE_PRIORITY + 2, &s_log_stream_task);
+        if (rc != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create log stream task");
+            s_log_stream_task_running = false;
+            cube32_log_capture_stream_enable(false, ESP_LOG_NONE);
+            m_log_stream_active = false;
+            sendResponse(CUBE32_BLE_CMD_LOG_STREAM_START, CUBE32_BLE_RESP_ERROR, nullptr, 0);
+            return;
+        }
+    }
+
+    ESP_LOGI(TAG, "Log streaming started (min_level=%d)", (int)level);
+    sendResponse(CUBE32_BLE_CMD_LOG_STREAM_START, CUBE32_BLE_RESP_OK, nullptr, 0);
+}
+
+void BleOta::handleLogStreamStop()
+{
+    cube32_log_capture_stream_enable(false, ESP_LOG_NONE);
+    s_log_stream_task_running = false;  // task self-exits within ~200ms
+    m_log_stream_active = false;
+
+    ESP_LOGI(TAG, "Log streaming stopped");
+    sendResponse(CUBE32_BLE_CMD_LOG_STREAM_STOP, CUBE32_BLE_RESP_OK, nullptr, 0);
+}
+
 } // namespace cube32
 
 #else // CONFIG_CUBE32_BLE_OTA_ENABLED not defined
@@ -2031,6 +2363,12 @@ void BleOta::handleOtaStart(const uint8_t*, size_t) {}
 void BleOta::handleOtaData(const uint8_t*, size_t) {}
 void BleOta::handleOtaEnd(const uint8_t*, size_t) {}
 void BleOta::handleOtaAbort() {}
+void BleOta::handleLogGetInfo() {}
+void BleOta::handleLogGetBootChunk(const uint8_t*, size_t) {}
+void BleOta::handleLogStreamStart(const uint8_t*, size_t) {}
+void BleOta::handleLogStreamStop() {}
+cube32_result_t BleOta::sendLogChunk(uint32_t, const uint8_t*, size_t) { return CUBE32_NOT_SUPPORTED; }
+cube32_result_t BleOta::sendLogLine(const uint8_t*, size_t) { return CUBE32_NOT_SUPPORTED; }
 void BleOta::cleanupOta() {}
 cube32_result_t BleOta::initBleStack() { return CUBE32_NOT_SUPPORTED; }
 cube32_result_t BleOta::initGattServer() { return CUBE32_NOT_SUPPORTED; }

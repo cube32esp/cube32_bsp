@@ -1,3 +1,11 @@
+file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/idf_component.yml" CUBE32_BSP_VERSION_LINE
+     REGEX "^version:[ \t]*[\"']?[0-9]+\\.[0-9]+\\.[0-9]+")
+string(REGEX REPLACE "^version:[ \t]*[\"']?([0-9]+\\.[0-9]+\\.[0-9]+).*" "\\1"
+       CUBE32_BSP_VERSION "${CUBE32_BSP_VERSION_LINE}")
+if(NOT CUBE32_BSP_VERSION)
+    message(FATAL_ERROR "CUBE32: unable to read the version from idf_component.yml")
+endif()
+
 file(GLOB_RECURSE SOURCES "src/*.c" "src/*.cpp")
 
 # LVGL configuration symbols are only generated when LVGL is enabled, so do
@@ -85,6 +93,10 @@ idf_component_register(
         esp_adc
         button
         usb
+)
+
+target_compile_definitions(${COMPONENT_LIB} PUBLIC
+    CUBE32_BSP_VERSION=\"${CUBE32_BSP_VERSION}\"
 )
 
 # idf_component_register's PRIV_REQUIRES does not reliably propagate include

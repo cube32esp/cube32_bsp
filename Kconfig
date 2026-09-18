@@ -436,6 +436,54 @@ menu "CUBE32 Board Configuration"
                 range 5000 120000
                 help
                     Timeout in milliseconds for USB modem to connect.
+
+            config CUBE32_MODEM_USB_SYNC_RETRY_COUNT
+                int "Initial Sync Retry Count"
+                default 8
+                range 1 30
+                help
+                    Number of AT sync attempts during USB modem initialization
+                    before giving up and continuing in command mode anyway.
+                    Increase this if the USB link is electrically noisy and
+                    early sync attempts tend to fail.
+
+            config CUBE32_MODEM_USB_ERROR_THRESHOLD
+                int "USB Error Threshold Before Recovery"
+                default 5
+                range 2 50
+                help
+                    Number of transient USB CDC-ACM errors (UNEXPECTED_CONTROL_FLOW,
+                    BUFFER_OVERFLOW, CHECKSUM_ERROR) allowed within the error window
+                    before the driver triggers its recovery sequence. Raise this if
+                    a marginal USB signal (e.g. seen as slow/ringing edges on D+/D-
+                    on a scope) causes occasional recoverable errors that don't
+                    warrant disrupting an active PPP session.
+
+            config CUBE32_MODEM_USB_ERROR_WINDOW_MS
+                int "USB Error Counting Window (ms)"
+                default 10000
+                range 1000 120000
+                help
+                    Sliding time window in milliseconds used to count transient
+                    USB errors toward CUBE32_MODEM_USB_ERROR_THRESHOLD.
+
+            config CUBE32_MODEM_USB_RECOVERY_TOGGLE_RETRIES
+                int "Recovery Mode-Toggle Retry Count"
+                default 3
+                range 1 10
+                help
+                    Number of times the recovery task retries toggling
+                    command/data mode (stage 1) before falling back to a full
+                    command-mode reset (stage 2).
+
+            config CUBE32_MODEM_USB_MAX_RECOVERY_ATTEMPTS
+                int "Max Consecutive Recovery Attempts"
+                default 5
+                range 1 20
+                help
+                    Number of consecutive recovery cycles allowed before the
+                    driver escalates to a modem AT-level reset as a last resort.
+                    The counter resets after a successful data-mode reconnect.
         endmenu
 
         menu "UART Configuration"
@@ -523,6 +571,47 @@ menu "CUBE32 Board Configuration"
                 Maximum Transmission Unit size for BLE GATT.
                 Larger MTU improves OTA transfer speed.
                 517 is the maximum for NimBLE.
+
+    endmenu
+
+    menu "Log Capture Configuration"
+        config CUBE32_LOG_CAPTURE_ENABLED
+            bool "Enable boot/runtime log capture (for BLE OTA log retrieval)"
+            default y
+            help
+                Mirrors ESP_LOG output into a fixed-size PSRAM buffer from the
+                very start of cube32_init(), so it can be retrieved later
+                (e.g. by an AI agent) over BLE OTA's log commands.
+
+        config CUBE32_LOG_CAPTURE_BOOT_BUFFER_SIZE
+            int "Boot log PSRAM buffer size (bytes)"
+            default 32768
+            range 4096 1048576
+            depends on CUBE32_LOG_CAPTURE_ENABLED
+            help
+                Fixed, append-only PSRAM buffer that captures log output from
+                the start of cube32_init(). Capture continues past board-init
+                complete and only freezes once a client requests a boot-log
+                chunk over BLE (or the buffer fills up).
+
+        config CUBE32_LOG_CAPTURE_STREAM_QUEUE_LEN
+            int "Live log stream queue depth (lines)"
+            default 32
+            range 4 256
+            depends on CUBE32_LOG_CAPTURE_ENABLED
+            help
+                Number of log lines buffered for live BLE streaming before
+                older/new lines are dropped (non-blocking — never stalls the
+                logging task).
+
+        config CUBE32_LOG_CAPTURE_MAX_LINE_LEN
+            int "Max captured log line length (bytes)"
+            default 200
+            range 32 500
+            depends on CUBE32_LOG_CAPTURE_ENABLED
+            help
+                Longer lines are truncated. Keep at or below the BLE notify
+                payload size used for live-stream lines.
 
     endmenu
 

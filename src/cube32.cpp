@@ -6,8 +6,8 @@
 #include "cube32.h"
 #include "utils/hw_manifest.h"
 #include "utils/config_manager.h"
+#include "utils/log_capture.h"
 
-#include <cstdio>
 #include <cinttypes>
 #include <cstring>
 
@@ -31,12 +31,7 @@ static bool s_core_initialized = false;
  */
 const char* cube32_get_version(void)
 {
-    static char version[16];
-    snprintf(version, sizeof(version), "%d.%d.%d",
-             CUBE32_BSP_VERSION_MAJOR,
-             CUBE32_BSP_VERSION_MINOR,
-             CUBE32_BSP_VERSION_PATCH);
-    return version;
+    return CUBE32_BSP_VERSION;
 }
 
 /**
@@ -117,6 +112,10 @@ esp_err_t cube32_init_core(void)
 esp_err_t cube32_init(void)
 {
     esp_err_t ret;
+
+    /* Start boot-log capture into PSRAM before anything else logs, so the
+     * BLE OTA log commands can retrieve the full boot log later. */
+    cube32_log_capture_init();
 
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "Initializing CUBE32 Board...");
@@ -1007,6 +1006,10 @@ esp_err_t cube32_init(void)
     /* Mark init complete and print the driver init status summary */
     hw->init_done = true;
     cube32_hw_manifest_print_init_status(hw);
+
+    /* Informational only — boot-log capture keeps running until a BLE
+     * client actually requests it (see log_capture.h). */
+    cube32_log_capture_mark_boot_complete();
 
     #undef CUBE32_INIT_SET
 

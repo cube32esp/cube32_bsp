@@ -75,11 +75,11 @@ extern "C" {
 #endif
 
 /**
- * @brief CUBE32 BSP version
+ * @brief CUBE32 BSP version, provided by the component's idf_component.yml.
  */
-#define CUBE32_BSP_VERSION_MAJOR 1
-#define CUBE32_BSP_VERSION_MINOR 0
-#define CUBE32_BSP_VERSION_PATCH 0
+#ifndef CUBE32_BSP_VERSION
+#define CUBE32_BSP_VERSION "unknown"
+#endif
 
 /**
  * @brief Initialize CUBE32 board

@@ -54,6 +54,17 @@
 #define CUBE32_BLE_CMD_OTA_END              0x22
 #define CUBE32_BLE_CMD_OTA_ABORT            0x23
 
+// Boot/runtime log commands (sent via Customer Command char 0x8023; the
+// actual log bytes are delivered on the dedicated Log Data characteristic)
+#define CUBE32_BLE_CMD_LOG_GET_INFO         0x30
+#define CUBE32_BLE_CMD_LOG_GET_BOOT_CHUNK   0x31
+#define CUBE32_BLE_CMD_LOG_STREAM_START     0x32
+#define CUBE32_BLE_CMD_LOG_STREAM_STOP      0x33
+
+// Frame-type bytes used only on Log Data characteristic (0x8024) notifications
+#define CUBE32_BLE_LOG_FRAME_CHUNK          0x01  ///< [type][4B offset][2B len][data...]
+#define CUBE32_BLE_LOG_FRAME_LIVE_LINE      0x10  ///< [type][data...]
+
 // Response status codes
 #define CUBE32_BLE_RESP_OK                  0x00
 #define CUBE32_BLE_RESP_ERROR               0x01
@@ -330,6 +341,23 @@ public:
     cube32_result_t sendTextResponse(const char* text);
 
     /**
+     * @brief Send one boot-log chunk on the Log Data characteristic
+     * @param offset Byte offset of this chunk within the captured boot log
+     * @param data Chunk payload (can be nullptr if len is 0)
+     * @param len Chunk payload length
+     * @return CUBE32_OK on success, error code otherwise
+     */
+    cube32_result_t sendLogChunk(uint32_t offset, const uint8_t* data, size_t len);
+
+    /**
+     * @brief Send one live-stream log line on the Log Data characteristic
+     * @param data Log line bytes
+     * @param len Log line length
+     * @return CUBE32_OK on success, error code otherwise
+     */
+    cube32_result_t sendLogLine(const uint8_t* data, size_t len);
+
+    /**
      * @brief Register command callback
      * @param callback Function to call when command is received
      */
@@ -406,6 +434,10 @@ private:
     void handleOtaData(const uint8_t* data, size_t len);
     void handleOtaEnd(const uint8_t* data, size_t len);
     void handleOtaAbort();
+    void handleLogGetInfo();
+    void handleLogGetBootChunk(const uint8_t* data, size_t len);
+    void handleLogStreamStart(const uint8_t* data, size_t len);
+    void handleLogStreamStop();
     void generateOrLoadDeviceId();
     void buildFullDeviceName();
     void cleanupOta();
@@ -418,6 +450,7 @@ private:
     BleOtaProgressCallback m_ota_callback = nullptr;
     BleTextMessageCallback m_text_subscribers[CUBE32_BLE_TEXT_MSG_MAX_SUBSCRIBERS] = {};
     uint16_t m_mtu = 23;
+    bool m_log_stream_active = false;
     
     // OTA state
     void* m_ota_handle = nullptr;       // esp_ota_handle_t

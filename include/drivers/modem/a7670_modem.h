@@ -60,9 +60,37 @@ namespace cube32 {
 // USB DTE buffer size (must accommodate PPP MTU 1500 + framing)
 #define CUBE32_MODEM_DTE_BUFFER_SIZE         1600
 
-// USB error recovery thresholds
-#define CUBE32_MODEM_USB_ERROR_THRESHOLD     3       ///< Errors within window to trigger recovery
-#define CUBE32_MODEM_USB_ERROR_WINDOW_MS     5000    ///< Time window for error counting
+// USB error recovery thresholds (overridable via menuconfig, see Kconfig "Modem USB Configuration")
+#ifdef CONFIG_CUBE32_MODEM_USB_ERROR_THRESHOLD
+#define CUBE32_MODEM_USB_ERROR_THRESHOLD     CONFIG_CUBE32_MODEM_USB_ERROR_THRESHOLD
+#else
+#define CUBE32_MODEM_USB_ERROR_THRESHOLD     5       ///< Errors within window to trigger recovery
+#endif
+
+#ifdef CONFIG_CUBE32_MODEM_USB_ERROR_WINDOW_MS
+#define CUBE32_MODEM_USB_ERROR_WINDOW_MS      CONFIG_CUBE32_MODEM_USB_ERROR_WINDOW_MS
+#else
+#define CUBE32_MODEM_USB_ERROR_WINDOW_MS      10000   ///< Time window for error counting
+#endif
+
+#ifdef CONFIG_CUBE32_MODEM_USB_RECOVERY_TOGGLE_RETRIES
+#define CUBE32_MODEM_USB_RECOVERY_TOGGLE_RETRIES CONFIG_CUBE32_MODEM_USB_RECOVERY_TOGGLE_RETRIES
+#else
+#define CUBE32_MODEM_USB_RECOVERY_TOGGLE_RETRIES 3     ///< Stage-1 mode-toggle retries before falling back
+#endif
+
+#ifdef CONFIG_CUBE32_MODEM_USB_MAX_RECOVERY_ATTEMPTS
+#define CUBE32_MODEM_USB_MAX_RECOVERY_ATTEMPTS CONFIG_CUBE32_MODEM_USB_MAX_RECOVERY_ATTEMPTS
+#else
+#define CUBE32_MODEM_USB_MAX_RECOVERY_ATTEMPTS 5       ///< Consecutive recoveries before escalating to AT reset
+#endif
+
+#ifdef CONFIG_CUBE32_MODEM_USB_SYNC_RETRY_COUNT
+#define CUBE32_MODEM_USB_SYNC_RETRY_COUNT     CONFIG_CUBE32_MODEM_USB_SYNC_RETRY_COUNT
+#else
+#define CUBE32_MODEM_USB_SYNC_RETRY_COUNT     8       ///< Initial AT sync attempts during USB init
+#endif
+
 #define CUBE32_MODEM_DATA_MODE_SETTLE_MS     200     ///< Stabilization delay after entering data mode
 
 // Event group bits
@@ -608,6 +636,7 @@ private:
     std::atomic<uint32_t> m_usb_error_count{0};
     uint32_t m_first_usb_error_time = 0;  ///< Tick count of first error in current window
     std::atomic<bool> m_recovery_pending{false};
+    std::atomic<uint32_t> m_recovery_attempt_count{0};  ///< Consecutive recovery cycles since last clean reconnect
 
     // Callbacks
     ModemStateCallback m_state_callback = nullptr;
